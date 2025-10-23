@@ -157,30 +157,45 @@ def calculate_failure_metrics(df):
     """Calculate key failure metrics"""
     metrics = {}
     
-    # Find status column
+    # Find status column (case-insensitive)
     status_col = None
     for col in df.columns:
-        if 'status' in col.lower():
+        if 'status' in str(col).lower() and 'item' not in str(col).lower():
             status_col = col
             break
     
     if status_col:
         metrics['total_work_orders'] = len(df)
-        metrics['completed'] = len(df[df[status_col].astype(str).str.contains('Completed', case=False, na=False)])
-        metrics['in_progress'] = len(df[df[status_col].astype(str).str.contains('Maintenance|Testing', case=False, na=False)])
-        metrics['waiting_parts'] = len(df[df[status_col].astype(str).str.contains('Waiting', case=False, na=False)])
+        # Convert to string and handle NaN values
+        status_series = df[status_col].fillna('').astype(str)
+        metrics['completed'] = len(df[status_series.str.contains('Completed', case=False, na=False)])
+        metrics['in_progress'] = len(df[status_series.str.contains('Maintenance|Testing|Progress|Ongoing', case=False, na=False)])
+        metrics['waiting_parts'] = len(df[status_series.str.contains('Waiting', case=False, na=False)])
         metrics['completion_rate'] = (metrics['completed'] / metrics['total_work_orders'] * 100) if metrics['total_work_orders'] > 0 else 0
+    else:
+        # If no status column found, still provide basic metrics
+        metrics['total_work_orders'] = len(df)
+        metrics['completed'] = 0
+        metrics['in_progress'] = 0
+        metrics['waiting_parts'] = 0
+        metrics['completion_rate'] = 0
     
     return metrics
 
 def identify_top_failures(df, limit=10):
     """Identify most common failure types"""
-    # Look for vehicle type or malfunction columns
+    # Look for vehicle type column - prioritize English columns
     vehicle_col = None
     for col in df.columns:
-        if 'vehicle' in col.lower() or 'model' in col.lower():
+        col_lower = str(col).lower()
+        if 'vehicle' in col_lower and 'english' in col_lower:
             vehicle_col = col
             break
+        elif 'vehicle type' in col_lower and 'arabic' not in col_lower:
+            vehicle_col = col
+            break
+        elif 'vehicle' in col_lower or 'model' in col_lower:
+            vehicle_col = col
     
     if vehicle_col:
         failure_counts = df[vehicle_col].value_counts().head(limit)
@@ -192,7 +207,8 @@ def analyze_by_workshop(df):
     """Analyze failures by workshop"""
     workshop_col = None
     for col in df.columns:
-        if 'workshop' in col.lower():
+        col_lower = str(col).lower()
+        if 'workshop' in col_lower and 'arabic' not in col_lower:
             workshop_col = col
             break
     
@@ -308,7 +324,8 @@ def main():
                 # Status distribution
                 status_col = None
                 for col in df.columns:
-                    if 'status' in col.lower():
+                    col_str = str(col).lower()
+                    if col_str == 'status' or (col_str.endswith('status') and 'item' not in col_str):
                         status_col = col
                         break
                 
