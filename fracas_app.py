@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 FRACAS - Advanced Military Vehicle Maintenance System
-With Anomaly Detection and Recurrence Analysis
+Merged Version with All Features
 
 Features:
 - Automatic column detection and mapping
@@ -11,6 +11,9 @@ Features:
 - Reliability KPIs (MTBF, MTTR, Availability)
 - Advanced anomaly detection
 - Cost and performance analysis
+- Workshop and sector analysis
+- Spare parts management
+- Trend analysis
 """
 
 import streamlit as st
@@ -21,9 +24,17 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import io
 from datetime import datetime, timedelta
-from scipy import stats
+import hashlib
 import warnings
 warnings.filterwarnings('ignore')
+
+# Try to import scipy, but make it optional
+try:
+    from scipy import stats
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    st.warning("⚠️ scipy not available. Some statistical features will be limited.")
 
 # Page configuration
 st.set_page_config(
@@ -46,6 +57,13 @@ st.markdown("""
         border-left: 4px solid #1f77b4;
     }
     .stTabs [data-baseweb="tab-list"] { gap: 2rem; }
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: #1f77b4;
+        text-align: center;
+        padding: 1rem 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -80,12 +98,19 @@ def init_session_state():
 
 # ==================== DATA LOADING AND CLEANING ====================
 
-@st.cache_data
-def load_data(file_path=None, uploaded_file=None):
+def make_file_hash(file_bytes):
+    """Create a hash of file bytes for cache key"""
+    return hashlib.md5(file_bytes).hexdigest()
+
+@st.cache_data(show_spinner="Processing Excel file...")
+def load_data(file_hash=None, file_bytes=None, file_path=None):
     """Load Excel file with automatic path detection"""
     try:
-        if uploaded_file is not None:
-            df = pd.read_excel(uploaded_file)
+        if file_bytes is not None:
+            file_like = io.BytesIO(file_bytes)
+            df = pd.read_excel(file_like)
+        elif file_path is not None:
+            df = pd.read_excel(file_path)
         else:
             # Try multiple default paths
             paths = [
@@ -98,7 +123,7 @@ def load_data(file_path=None, uploaded_file=None):
             for path in paths:
                 try:
                     df = pd.read_excel(path)
-                    st.success(f"Loaded data from: {path}")
+                    st.success(f"✓ Loaded data from: {path}")
                     break
                 except:
                     continue
@@ -109,10 +134,15 @@ def load_data(file_path=None, uploaded_file=None):
         
         # Clean column names
         df.columns = df.columns.str.strip()
+        
+        st.info(f"📊 Processing {len(df):,} work orders with {len(df.columns)} columns...")
+        
         return df
         
     except Exception as e:
         st.error(f"Error loading file: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return None
 
 def auto_detect_columns(df):
@@ -131,7 +161,7 @@ def auto_detect_columns(df):
         'OpenDate': ['date', 'open', 'created', 'start', 'opened'],
         'CloseDate': ['close', 'completion', 'end', 'completed', 'completetion'],
         'Status': ['status', 'state', 'work order status'],
-        'Location': ['location', 'workshop', 'site', 'facility'],
+        'Location': ['location', 'workshop', 'site', 'facility', 'workshop name'],
         'FailureDesc': ['failure', 'description', 'malfunction', 'issue', 'problem'],
         'FailureMode': ['mode', 'type', 'category', 'classification'],
         'Subsystem': ['subsystem', 'component', 'system', 'part'],
@@ -217,1288 +247,881 @@ def clean_and_enrich_data(df, mapping):
 # ==================== ANOMALY DETECTION ====================
 
 def detect_anomalies(df):
-    """Comprehensive anomaly detection"""
-    if df is None or df.empty:
-        return df, pd.DataFrame()
+    """Comprehensive anomaly detection - scipy optional"""
+    if df is None or len(df) == 0:
+        return pd.DataFrame()
     
-    df_anomaly = df.copy()
-    anomalies = []
     thresholds = st.session_state.anomaly_thresholds
+    anomalies = []
     
-    # 1. Repeat Failure Detection
-    if 'VehicleID' in df_anomaly.columns and 'FailureMode' in df_anomaly.columns and 'OpenDate' in df_anomaly.columns:
-        df_anomaly = df_anomaly.sort_values(['VehicleID', 'FailureMode', 'OpenDate'])
+    # 1. Repeat Failures (same vehicle, similar issue, within threshold days)
+    if 'VehicleID' in df.columns and 'FailureMode' in df.columns and 'OpenDate' in df.columns:
+        df_sorted = df.sort_values(['VehicleID', 'OpenDate'])
         
-        for idx, row in df_anomaly.iterrows():
-            # Check for repeat failures
-            mask = (
-                (df_anomaly['VehicleID'] == row['VehicleID']) &
-                (df_anomaly['FailureMode'] == row['FailureMode']) &
-                (df_anomaly['OpenDate'] < row['OpenDate']) &
-                ((row['OpenDate'] - df_anomaly['OpenDate']).dt.days <= thresholds['repeat_days'])
-            )
+        for vehicle in df_sorted['VehicleID'].unique():
+            vehicle_data = df_sorted[df_sorted['VehicleID'] == vehicle]
             
-            if mask.any():
-                df_anomaly.at[idx, 'RepeatFailureFlag'] = True
-                anomalies.append({
-                    'Type': 'Repeat Failure',
-                    'VehicleID': row['VehicleID'],
-                    'Description': f"Failure mode '{row.get('FailureMode', 'Unknown')}' repeated within {thresholds['repeat_days']} days",
-                    'Severity': 'High',
-                    'Date': row['OpenDate']
-                })
+            for i in range(len(vehicle_data) - 1):
+                current_row = vehicle_data.iloc[i]
+                next_row = vehicle_data.iloc[i + 1]
+                
+                days_diff = (next_row['OpenDate'] - current_row['OpenDate']).days
+                
+                if days_diff <= thresholds['repeat_days']:
+                    anomalies.append({
+                        'Type': 'Repeat Failure',
+                        'Severity': 'High',
+                        'WorkOrderID': next_row.get('WorkOrderID', 'N/A'),
+                        'VehicleID': vehicle,
+                        'Details': f"Same vehicle failed {days_diff} days after previous repair",
+                        'Date': next_row['OpenDate']
+                    })
     
-    # 2. Quick Return Detection
-    if 'VehicleID' in df_anomaly.columns and 'DaysSinceLastFailure' in df_anomaly.columns:
-        quick_returns = df_anomaly[
-            (df_anomaly['DaysSinceLastFailure'] <= thresholds['quick_return_days']) &
-            (df_anomaly['DaysSinceLastFailure'] > 0)
+    # 2. Quick Return (vehicle returns quickly for any issue)
+    if 'DaysSinceLastFailure' in df.columns:
+        quick_returns = df[
+            (df['DaysSinceLastFailure'].notna()) &
+            (df['DaysSinceLastFailure'] < thresholds['quick_return_days'])
         ]
         
-        for idx in quick_returns.index:
-            df_anomaly.at[idx, 'QuickReturnFlag'] = True
+        for _, row in quick_returns.iterrows():
             anomalies.append({
                 'Type': 'Quick Return',
-                'VehicleID': quick_returns.at[idx, 'VehicleID'],
-                'Description': f"Returned after only {quick_returns.at[idx, 'DaysSinceLastFailure']:.0f} days",
-                'Severity': 'High',
-                'Date': quick_returns.at[idx, 'OpenDate']
-            })
-    
-    # 3. High Frequency Failures
-    if 'VehicleID' in df_anomaly.columns and 'OpenDate' in df_anomaly.columns:
-        # Calculate failure frequency per vehicle
-        vehicle_counts = df_anomaly.groupby('VehicleID').size()
-        
-        # Calculate time span for each vehicle
-        vehicle_spans = df_anomaly.groupby('VehicleID')['OpenDate'].agg(['min', 'max'])
-        vehicle_spans['months'] = (vehicle_spans['max'] - vehicle_spans['min']).dt.days / 30
-        vehicle_spans['months'] = vehicle_spans['months'].clip(lower=1)
-        
-        # Failures per month
-        vehicle_frequency = vehicle_counts / vehicle_spans['months']
-        
-        # Identify high-frequency vehicles
-        mean_freq = vehicle_frequency.mean()
-        std_freq = vehicle_frequency.std()
-        high_freq_threshold = mean_freq + (thresholds['frequency_std'] * std_freq)
-        
-        high_freq_vehicles = vehicle_frequency[vehicle_frequency > high_freq_threshold]
-        
-        for vehicle_id, freq in high_freq_vehicles.items():
-            df_anomaly.loc[df_anomaly['VehicleID'] == vehicle_id, 'HighFrequencyFlag'] = True
-            anomalies.append({
-                'Type': 'High Frequency',
-                'VehicleID': vehicle_id,
-                'Description': f"Failure rate {freq:.2f}/month (threshold: {high_freq_threshold:.2f})",
                 'Severity': 'Medium',
-                'Date': datetime.now()
+                'WorkOrderID': row.get('WorkOrderID', 'N/A'),
+                'VehicleID': row.get('VehicleID', 'N/A'),
+                'Details': f"Vehicle returned after only {row['DaysSinceLastFailure']:.0f} days",
+                'Date': row.get('OpenDate', datetime.now())
             })
     
-    # 4. Abnormal Cost Detection
-    if 'TotalCost' in df_anomaly.columns and 'FailureMode' in df_anomaly.columns:
-        # Calculate median cost per failure mode
-        cost_stats = df_anomaly.groupby('FailureMode')['TotalCost'].agg(['median', 'mean'])
+    # 3. High Cost Anomalies
+    if 'TotalCost' in df.columns and df['TotalCost'].notna().sum() > 0:
+        cost_mean = df['TotalCost'].mean()
+        cost_std = df['TotalCost'].std()
         
-        for idx, row in df_anomaly.iterrows():
-            if pd.notna(row.get('FailureMode')) and pd.notna(row.get('TotalCost')):
-                failure_mode = row['FailureMode']
-                if failure_mode in cost_stats.index:
-                    median_cost = cost_stats.loc[failure_mode, 'median']
-                    if median_cost > 0 and row['TotalCost'] > (median_cost * thresholds['cost_multiplier']):
-                        df_anomaly.at[idx, 'HighCostFlag'] = True
-                        anomalies.append({
-                            'Type': 'High Cost',
-                            'VehicleID': row.get('VehicleID', 'Unknown'),
-                            'Description': f"Cost ${row['TotalCost']:.2f} is {row['TotalCost']/median_cost:.1f}x median",
-                            'Severity': 'Medium',
-                            'Date': row.get('OpenDate', datetime.now())
-                        })
-    
-    # 5. Abnormal Downtime Detection
-    if 'DowntimeHours' in df_anomaly.columns and 'FailureMode' in df_anomaly.columns:
-        # Calculate median downtime per failure mode
-        downtime_stats = df_anomaly.groupby('FailureMode')['DowntimeHours'].agg(['median', 'mean'])
-        
-        for idx, row in df_anomaly.iterrows():
-            if pd.notna(row.get('FailureMode')) and pd.notna(row.get('DowntimeHours')):
-                failure_mode = row['FailureMode']
-                if failure_mode in downtime_stats.index:
-                    median_downtime = downtime_stats.loc[failure_mode, 'median']
-                    if median_downtime > 0 and row['DowntimeHours'] > (median_downtime * thresholds['downtime_multiplier']):
-                        df_anomaly.at[idx, 'HighDowntimeFlag'] = True
-                        anomalies.append({
-                            'Type': 'High Downtime',
-                            'VehicleID': row.get('VehicleID', 'Unknown'),
-                            'Description': f"Downtime {row['DowntimeHours']:.1f}hrs is {row['DowntimeHours']/median_downtime:.1f}x median",
-                            'Severity': 'Medium',
-                            'Date': row.get('OpenDate', datetime.now())
-                        })
-    
-    # Create anomalies DataFrame
-    anomalies_df = pd.DataFrame(anomalies) if anomalies else pd.DataFrame()
-    
-    return df_anomaly, anomalies_df
-
-# ==================== RELIABILITY CALCULATIONS ====================
-
-def calculate_mtbf(df, group_by=None, base='days'):
-    """Calculate Mean Time Between Failures"""
-    if df is None or df.empty or 'OpenDate' not in df.columns:
-        return pd.DataFrame({'MTBF': [0], 'FailureCount': [0]})
-    
-    results = []
-    
-    if group_by and group_by in df.columns:
-        for name, group in df.groupby(group_by):
-            if len(group) > 1:
-                group_sorted = group.sort_values('OpenDate')
-                
-                if base == 'days':
-                    time_diffs = group_sorted['OpenDate'].diff().dt.days.dropna()
-                    mtbf = time_diffs.mean() if len(time_diffs) > 0 else 0
-                elif base == 'hours':
-                    time_diffs = group_sorted['OpenDate'].diff().dt.total_seconds() / 3600
-                    time_diffs = time_diffs.dropna()
-                    mtbf = time_diffs.mean() if len(time_diffs) > 0 else 0
-                else:  # operating hours or km if available
-                    if 'OperatingHours' in group.columns:
-                        total_hours = group['OperatingHours'].sum()
-                        mtbf = total_hours / len(group) if len(group) > 0 else 0
-                    else:
-                        mtbf = 0
-                
-                results.append({
-                    'Group': name,
-                    'MTBF': mtbf,
-                    'FailureCount': len(group),
-                    'Base': base
-                })
-    else:
-        # Overall MTBF
-        if len(df) > 1:
-            df_sorted = df.sort_values('OpenDate')
+        if cost_std > 0:
+            threshold_cost = cost_mean + (thresholds['cost_multiplier'] * cost_std)
+            high_cost = df[df['TotalCost'] > threshold_cost]
             
-            if base == 'days':
-                total_days = (df_sorted['OpenDate'].max() - df_sorted['OpenDate'].min()).days
-                mtbf = total_days / (len(df) - 1) if len(df) > 1 else 0
-            else:
-                mtbf = 0
-            
-            results.append({
-                'Group': 'Overall',
-                'MTBF': mtbf,
-                'FailureCount': len(df),
-                'Base': base
-            })
-    
-    return pd.DataFrame(results) if results else pd.DataFrame({'MTBF': [0], 'FailureCount': [0]})
-
-def calculate_mttr(df, group_by=None):
-    """Calculate Mean Time To Repair"""
-    if df is None or df.empty or 'RepairDuration' not in df.columns:
-        return pd.DataFrame({'MTTR': [0], 'RepairCount': [0]})
-    
-    results = []
-    
-    if group_by and group_by in df.columns:
-        for name, group in df.groupby(group_by):
-            valid_repairs = group['RepairDuration'].dropna()
-            if len(valid_repairs) > 0:
-                results.append({
-                    'Group': name,
-                    'MTTR': valid_repairs.mean(),
-                    'RepairCount': len(valid_repairs)
+            for _, row in high_cost.iterrows():
+                anomalies.append({
+                    'Type': 'High Cost',
+                    'Severity': 'High' if row['TotalCost'] > cost_mean + 3*cost_std else 'Medium',
+                    'WorkOrderID': row.get('WorkOrderID', 'N/A'),
+                    'VehicleID': row.get('VehicleID', 'N/A'),
+                    'Details': f"Cost ${row['TotalCost']:,.2f} (avg: ${cost_mean:,.2f})",
+                    'Date': row.get('OpenDate', datetime.now())
                 })
+    
+    # 4. High Downtime Anomalies
+    if 'DowntimeHours' in df.columns and df['DowntimeHours'].notna().sum() > 0:
+        downtime_mean = df['DowntimeHours'].mean()
+        downtime_std = df['DowntimeHours'].std()
+        
+        if downtime_std > 0:
+            threshold_downtime = downtime_mean + (thresholds['downtime_multiplier'] * downtime_std)
+            high_downtime = df[df['DowntimeHours'] > threshold_downtime]
+            
+            for _, row in high_downtime.iterrows():
+                anomalies.append({
+                    'Type': 'High Downtime',
+                    'Severity': 'High' if row['DowntimeHours'] > downtime_mean + 3*downtime_std else 'Medium',
+                    'WorkOrderID': row.get('WorkOrderID', 'N/A'),
+                    'VehicleID': row.get('VehicleID', 'N/A'),
+                    'Details': f"Downtime {row['DowntimeHours']:.1f}hrs (avg: {downtime_mean:.1f}hrs)",
+                    'Date': row.get('OpenDate', datetime.now())
+                })
+    
+    # 5. Unusual Failure Frequency (only if scipy available)
+    if SCIPY_AVAILABLE and 'FailureMode' in df.columns:
+        failure_counts = df['FailureMode'].value_counts()
+        if len(failure_counts) > 3:
+            mean_freq = failure_counts.mean()
+            std_freq = failure_counts.std()
+            
+            if std_freq > 0:
+                unusual_failures = failure_counts[
+                    failure_counts > mean_freq + (thresholds['frequency_std'] * std_freq)
+                ]
+                
+                for failure_mode, count in unusual_failures.items():
+                    anomalies.append({
+                        'Type': 'Unusual Frequency',
+                        'Severity': 'Medium',
+                        'WorkOrderID': 'Multiple',
+                        'VehicleID': 'Multiple',
+                        'Details': f"Failure mode '{failure_mode}' occurred {count} times (expected ~{mean_freq:.0f})",
+                        'Date': datetime.now()
+                    })
+    
+    if anomalies:
+        anomalies_df = pd.DataFrame(anomalies)
+        # Update flags in original dataframe
+        if 'WorkOrderID' in df.columns:
+            repeat_wos = anomalies_df[anomalies_df['Type'] == 'Repeat Failure']['WorkOrderID']
+            quick_wos = anomalies_df[anomalies_df['Type'] == 'Quick Return']['WorkOrderID']
+            cost_wos = anomalies_df[anomalies_df['Type'] == 'High Cost']['WorkOrderID']
+            downtime_wos = anomalies_df[anomalies_df['Type'] == 'High Downtime']['WorkOrderID']
+            
+            df.loc[df['WorkOrderID'].isin(repeat_wos), 'RepeatFailureFlag'] = True
+            df.loc[df['WorkOrderID'].isin(quick_wos), 'QuickReturnFlag'] = True
+            df.loc[df['WorkOrderID'].isin(cost_wos), 'HighCostFlag'] = True
+            df.loc[df['WorkOrderID'].isin(downtime_wos), 'HighDowntimeFlag'] = True
+        
+        return anomalies_df
+    
+    return pd.DataFrame()
+
+# ==================== BASIC ANALYSIS FUNCTIONS (FROM OLD CODE) ====================
+
+def calculate_failure_metrics(df):
+    """Calculate key failure metrics based on actual columns"""
+    metrics = {}
+    
+    # Use actual column name or mapped name
+    status_col = 'Work order status' if 'Work order status' in df.columns else 'Status'
+    
+    if status_col in df.columns:
+        metrics['total_work_orders'] = len(df)
+        status_series = df[status_col].fillna('').astype(str)
+        
+        # Adapt to actual status values in the data
+        metrics['completed'] = len(df[status_series.str.contains('Completed|Closed', case=False, na=False)])
+        metrics['in_progress'] = len(df[status_series.str.contains('Under Maintenance|Process Initiated|In Progress', case=False, na=False)])
+        metrics['waiting_parts'] = len(df[status_series.str.contains('Waiting Spare Parts|Waiting Parts', case=False, na=False)])
+        metrics['completion_rate'] = (metrics['completed'] / metrics['total_work_orders'] * 100) if metrics['total_work_orders'] > 0 else 0
     else:
-        valid_repairs = df['RepairDuration'].dropna()
-        if len(valid_repairs) > 0:
-            results.append({
-                'Group': 'Overall',
-                'MTTR': valid_repairs.mean(),
-                'RepairCount': len(valid_repairs)
-            })
+        metrics['total_work_orders'] = len(df)
+        metrics['completed'] = 0
+        metrics['in_progress'] = 0
+        metrics['waiting_parts'] = 0
+        metrics['completion_rate'] = 0
     
-    return pd.DataFrame(results) if results else pd.DataFrame({'MTTR': [0], 'RepairCount': [0]})
+    return metrics
 
-def calculate_availability(df, window_days=30):
-    """Calculate equipment availability"""
-    if df is None or df.empty:
-        return 0
+def identify_top_vehicles(df, limit=10):
+    """Identify most common vehicle types"""
+    vehicle_col = 'Vehicle Make and Model' if 'Vehicle Make and Model' in df.columns else 'EquipmentType'
     
-    # If we have downtime data
-    if 'DowntimeHours' in df.columns:
-        total_downtime = df['DowntimeHours'].sum()
+    if vehicle_col in df.columns:
+        vehicle_series = df[vehicle_col].fillna('Unknown').astype(str).str.strip()
+        vehicle_series = vehicle_series[vehicle_series.str.len() > 2]
+        vehicle_series = vehicle_series[vehicle_series != 'Unknown']
         
-        # Estimate total possible hours
-        if 'VehicleID' in df.columns:
-            fleet_size = df['VehicleID'].nunique()
-        else:
-            fleet_size = 1
-        
-        total_possible_hours = window_days * 24 * fleet_size
-        availability = ((total_possible_hours - total_downtime) / total_possible_hours * 100) if total_possible_hours > 0 else 0
-        return max(0, min(100, availability))
-    
-    # Alternative: use status
-    if 'Status' in df.columns:
-        operational = len(df[df['Status'] == 'Closed'])
-        total = len(df)
-        return (operational / total * 100) if total > 0 else 0
-    
-    return 0
+        if len(vehicle_series) > 0:
+            return vehicle_series.value_counts().head(limit)
+    return None
 
-# ==================== USER INTERFACE COMPONENTS ====================
+def analyze_by_workshop(df):
+    """Analyze work orders by workshop"""
+    workshop_col = 'Workshop name' if 'Workshop name' in df.columns else 'Location'
+    
+    if workshop_col in df.columns:
+        workshop_series = df[workshop_col].fillna('Unknown').astype(str).str.strip()
+        workshop_series = workshop_series[(workshop_series.str.len() > 2) & (workshop_series != 'Unknown')]
+        
+        if len(workshop_series) > 0:
+            return workshop_series.value_counts()
+    return None
+
+def analyze_by_sector(df):
+    """Analyze work orders by sector"""
+    sector_col = 'Sector'
+    
+    if sector_col in df.columns:
+        sector_series = df[sector_col].fillna('Unknown').astype(str).str.strip()
+        sector_series = sector_series[(sector_series.str.len() > 2) & (sector_series != 'Unknown')]
+        
+        if len(sector_series) > 0:
+            return sector_series.value_counts()
+    return None
+
+def create_trend_analysis(df):
+    """Create trend analysis based on Date column"""
+    date_col = 'Date' if 'Date' in df.columns else 'OpenDate'
+    
+    if date_col in df.columns and pd.api.types.is_datetime64_any_dtype(df[date_col]):
+        df_filtered = df[df[date_col].notna()].copy()
+        df_filtered['month'] = df_filtered[date_col].dt.to_period('M')
+        trend_data = df_filtered.groupby('month').size()
+        
+        status_col = 'Work order status' if 'Work order status' in df.columns else 'Status'
+        if status_col in df.columns:
+            status_trends = df_filtered.groupby(['month', status_col]).size().unstack(fill_value=0)
+            return trend_data, status_trends
+        
+        return trend_data, None
+    return None, None
+
+def analyze_spare_parts(df):
+    """Analyze spare parts requirements"""
+    spare_col = 'Spare parts Required' if 'Spare parts Required' in df.columns else 'SpareParts'
+    received_col = 'Received Spare Parts (Yes/No)'
+    
+    results = {}
+    
+    if spare_col in df.columns:
+        results['required'] = df[spare_col].value_counts()
+    
+    if received_col in df.columns:
+        results['received_count'] = df[received_col].notna().sum()
+        results['not_received_count'] = df[received_col].isna().sum()
+    
+    return results if results else None
+
+# ==================== RELIABILITY METRICS ====================
+
+def calculate_reliability_metrics(df):
+    """Calculate MTBF, MTTR, Availability"""
+    metrics = {}
+    
+    if 'RepairDuration' in df.columns and df['RepairDuration'].notna().sum() > 0:
+        metrics['MTTR'] = df['RepairDuration'].mean()
+        metrics['MTTR_median'] = df['RepairDuration'].median()
+    
+    if 'DaysSinceLastFailure' in df.columns and df['DaysSinceLastFailure'].notna().sum() > 0:
+        metrics['MTBF'] = df['DaysSinceLastFailure'].mean() * 24  # Convert days to hours
+        metrics['MTBF_median'] = df['DaysSinceLastFailure'].median() * 24
+    
+    if 'MTBF' in metrics and 'MTTR' in metrics:
+        mtbf = metrics['MTBF']
+        mttr = metrics['MTTR']
+        metrics['Availability'] = (mtbf / (mtbf + mttr)) * 100 if (mtbf + mttr) > 0 else 0
+    
+    return metrics
+
+# ==================== SIDEBAR ====================
 
 def render_sidebar():
-    """Render sidebar with controls and info"""
-    st.sidebar.title("🚗 FRACAS Control Panel")
-    
-    # User role
-    st.sidebar.selectbox(
-        "User Role",
-        ["Technician", "Engineer", "Supervisor", "Admin"],
-        key="user_role"
-    )
-    
-    st.sidebar.markdown("---")
-    
-    # Anomaly thresholds
-    st.sidebar.subheader("⚠️ Anomaly Thresholds")
-    
-    st.session_state.anomaly_thresholds['repeat_days'] = st.sidebar.slider(
-        "Repeat Failure Window (days)",
-        7, 90, 30
-    )
-    
-    st.session_state.anomaly_thresholds['quick_return_days'] = st.sidebar.slider(
-        "Quick Return Threshold (days)",
-        3, 30, 10
-    )
-    
-    st.session_state.anomaly_thresholds['cost_multiplier'] = st.sidebar.slider(
-        "High Cost Multiplier",
-        1.5, 5.0, 2.0
-    )
-    
-    st.session_state.anomaly_thresholds['downtime_multiplier'] = st.sidebar.slider(
-        "High Downtime Multiplier",
-        1.5, 5.0, 2.0
-    )
-    
-    st.sidebar.markdown("---")
-    
-    # System info
-    if st.session_state.df_cleaned is not None:
-        df = st.session_state.df_cleaned
-        st.sidebar.metric("Total Records", len(df))
+    """Render sidebar with controls"""
+    with st.sidebar:
+        st.header("⚙️ Settings & Controls")
         
-        if 'Status' in df.columns:
-            open_count = len(df[df['Status'].isin(['Open', 'In Progress'])])
-            st.sidebar.metric("Active Work Orders", open_count)
-        
-        # Anomaly summary
-        if st.session_state.anomalies is not None and not st.session_state.anomalies.empty:
-            st.sidebar.metric("Active Anomalies", len(st.session_state.anomalies))
-            
-            # Anomaly breakdown
-            anomaly_counts = st.session_state.anomalies['Type'].value_counts()
-            for atype, count in anomaly_counts.items():
-                st.sidebar.write(f"• {atype}: {count}")
-
-def render_data_tab():
-    """Data import and cleaning interface"""
-    st.header("📂 Data Import & Cleaning")
-    
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
-        # File upload
-        uploaded_file = st.file_uploader(
-            "Upload Excel File",
-            type=['xlsx', 'xls'],
-            help="Upload work order data"
+        # User role selection
+        st.session_state.user_role = st.selectbox(
+            "User Role",
+            ["Engineer", "Manager", "Analyst", "Admin"],
+            index=["Engineer", "Manager", "Analyst", "Admin"].index(st.session_state.user_role)
         )
         
-        # Load data button
-        if st.button("Load Data", type="primary") or uploaded_file:
-            with st.spinner("Loading and processing data..."):
-                df = load_data(uploaded_file=uploaded_file)
-                
-                if df is not None:
-                    st.session_state.df = df
-                    st.session_state.column_mapping = auto_detect_columns(df)
-                    st.success(f"✅ Loaded {len(df)} records with {len(df.columns)} columns")
-    
-    with col2:
-        if st.session_state.df is not None:
-            st.subheader("Column Mapping")
+        st.divider()
+        
+        # File upload
+        st.subheader("📁 Data Upload")
+        uploaded_file = st.file_uploader(
+            "Upload Work Orders Excel",
+            type=['xlsx', 'xls'],
+            help="Upload your work orders Excel file"
+        )
+        
+        if uploaded_file is not None:
+            file_bytes = uploaded_file.read()
+            file_hash = make_file_hash(file_bytes)
             
-            # Display detected mappings
-            mapping = st.session_state.column_mapping
-            st.info(f"Auto-detected {len(mapping)} column mappings")
-            
-            # Show mapping summary
-            if mapping:
-                mapping_df = pd.DataFrame(
-                    [(k, v) for k, v in mapping.items()],
-                    columns=['Target Field', 'Detected Column']
+            if st.button("🔄 Process Uploaded File"):
+                with st.spinner("Processing..."):
+                    df = load_data(file_hash=file_hash, file_bytes=file_bytes)
+                    if df is not None:
+                        st.session_state.df = df
+                        mapping = auto_detect_columns(df)
+                        st.session_state.column_mapping = mapping
+                        st.session_state.df_cleaned = clean_and_enrich_data(df, mapping)
+                        st.session_state.anomalies = detect_anomalies(st.session_state.df_cleaned)
+                        st.success("✓ File processed successfully!")
+                        st.rerun()
+        
+        # Try to load default file
+        if st.session_state.df is None:
+            if st.button("📂 Load Default File"):
+                with st.spinner("Loading default file..."):
+                    df = load_data()
+                    if df is not None:
+                        st.session_state.df = df
+                        mapping = auto_detect_columns(df)
+                        st.session_state.column_mapping = mapping
+                        st.session_state.df_cleaned = clean_and_enrich_data(df, mapping)
+                        st.session_state.anomalies = detect_anomalies(st.session_state.df_cleaned)
+                        st.rerun()
+        
+        st.divider()
+        
+        # Anomaly detection settings
+        if st.session_state.user_role in ['Manager', 'Admin']:
+            with st.expander("🔍 Anomaly Detection Settings"):
+                st.number_input(
+                    "Repeat Failure Window (days)",
+                    min_value=1,
+                    max_value=90,
+                    value=st.session_state.anomaly_thresholds['repeat_days'],
+                    key='repeat_days_input'
                 )
-                st.dataframe(mapping_df, use_container_width=True)
-            
-            # Apply cleaning
-            if st.button("Apply Cleaning & Enrichment", type="primary"):
-                with st.spinner("Cleaning data and detecting anomalies..."):
-                    # Clean data
-                    df_cleaned = clean_and_enrich_data(st.session_state.df, mapping)
-                    
-                    # Detect anomalies
-                    df_cleaned, anomalies_df = detect_anomalies(df_cleaned)
-                    
-                    st.session_state.df_cleaned = df_cleaned
-                    st.session_state.anomalies = anomalies_df
-                    
-                    st.success(f"✅ Data cleaned and {len(anomalies_df)} anomalies detected!")
+                st.number_input(
+                    "Quick Return Window (days)",
+                    min_value=1,
+                    max_value=30,
+                    value=st.session_state.anomaly_thresholds['quick_return_days'],
+                    key='quick_return_input'
+                )
+                
+                if st.button("Update Thresholds"):
+                    st.session_state.anomaly_thresholds['repeat_days'] = st.session_state.repeat_days_input
+                    st.session_state.anomaly_thresholds['quick_return_days'] = st.session_state.quick_return_input
+                    if st.session_state.df_cleaned is not None:
+                        st.session_state.anomalies = detect_anomalies(st.session_state.df_cleaned)
+                    st.success("Thresholds updated!")
+                    st.rerun()
+        
+        st.divider()
+        
+        # Clear cache
+        if st.button("🗑️ Clear Cache & Reprocess"):
+            st.cache_data.clear()
+            st.session_state.df = None
+            st.session_state.df_cleaned = None
+            st.session_state.anomalies = pd.DataFrame()
+            st.success("Cache cleared!")
+            st.rerun()
+        
+        # Data info
+        if st.session_state.df is not None:
+            st.divider()
+            st.subheader("📊 Data Info")
+            st.info(f"**Records:** {len(st.session_state.df):,}")
+            if st.session_state.df_cleaned is not None:
+                st.info(f"**Mapped Columns:** {len(st.session_state.column_mapping)}")
+            if not st.session_state.anomalies.empty:
+                st.warning(f"**Anomalies:** {len(st.session_state.anomalies)}")
+
+# ==================== DATA TAB ====================
+
+def render_data_tab():
+    """Render data overview and column mapping"""
+    st.header("📂 Data Overview")
     
-    # Preview cleaned data
-    if st.session_state.df_cleaned is not None:
-        st.subheader("Cleaned Data Preview")
-        
-        df = st.session_state.df_cleaned
-        
-        # Metrics
-        col1, col2, col3, col4, col5 = st.columns(5)
-        
-        with col1:
-            st.metric("Total Records", len(df))
-        
-        with col2:
-            if 'Status' in df.columns:
-                closed = len(df[df['Status'] == 'Closed'])
-                st.metric("Closed", closed)
-        
-        with col3:
-            repeat_count = df['RepeatFailureFlag'].sum() if 'RepeatFailureFlag' in df.columns else 0
-            st.metric("Repeat Failures", repeat_count)
-        
-        with col4:
-            quick_return = df['QuickReturnFlag'].sum() if 'QuickReturnFlag' in df.columns else 0
-            st.metric("Quick Returns", quick_return)
-        
-        with col5:
-            high_cost = df['HighCostFlag'].sum() if 'HighCostFlag' in df.columns else 0
-            st.metric("High Cost", high_cost)
-        
-        # Show data with anomaly highlighting
-        def highlight_anomalies(row):
-            if row.get('RepeatFailureFlag') or row.get('QuickReturnFlag'):
-                return ['background-color: #ffcccc'] * len(row)
-            elif row.get('HighCostFlag') or row.get('HighDowntimeFlag'):
-                return ['background-color: #ffe5cc'] * len(row)
-            return [''] * len(row)
-        
-        styled_df = df.head(100).style.apply(highlight_anomalies, axis=1)
-        st.dataframe(styled_df, use_container_width=True)
-        
-        # Export buttons
+    if st.session_state.df is None:
+        st.info("👆 Please upload a file or load the default file from the sidebar")
+        return
+    
+    df = st.session_state.df
+    
+    # Basic stats
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Records", f"{len(df):,}")
+    with col2:
+        st.metric("Columns", len(df.columns))
+    with col3:
+        date_cols = [col for col in df.columns if 'date' in col.lower()]
+        if date_cols:
+            date_col = date_cols[0]
+            date_range = f"{df[date_col].min().strftime('%Y-%m-%d')} to {df[date_col].max().strftime('%Y-%m-%d')}"
+            st.metric("Date Range", date_range)
+    with col4:
+        if st.session_state.df_cleaned is not None:
+            st.metric("Mapped Fields", len(st.session_state.column_mapping))
+    
+    # Column mapping
+    st.subheader("🗺️ Column Mapping")
+    
+    if st.session_state.column_mapping:
         col1, col2 = st.columns(2)
         
         with col1:
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "📥 Download Cleaned CSV",
-                csv,
-                "cleaned_data.csv",
-                "text/csv"
-            )
+            st.markdown("**Standard Field → Excel Column**")
+            for standard, excel in st.session_state.column_mapping.items():
+                st.text(f"{standard} → {excel}")
         
         with col2:
-            # Safe Excel export
-            try:
-                buffer = io.BytesIO()
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Cleaned_Data')
-                
-                st.download_button(
-                    "📥 Download Cleaned Excel",
-                    buffer.getvalue(),
-                    "cleaned_data.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            except:
-                st.warning("Excel export unavailable, use CSV instead")
-
-def render_failures_tab():
-    """Failure reporting and management"""
-    st.header("📝 Failure Reporting")
+            st.markdown("**Data Sample**")
+            for standard, excel in list(st.session_state.column_mapping.items())[:5]:
+                sample_values = df[excel].dropna().head(3).tolist()
+                st.text(f"{standard}: {sample_values}")
     
-    if st.session_state.df_cleaned is None:
-        st.warning("Please import and clean data first")
+    # Detected columns expander
+    with st.expander("📋 All Detected Columns"):
+        cols_info = []
+        for col in df.columns:
+            non_null = df[col].notna().sum()
+            dtype = df[col].dtype
+            cols_info.append({
+                'Column': col,
+                'Non-Empty': non_null,
+                'Type': str(dtype),
+                'Percentage': f"{non_null/len(df)*100:.1f}%"
+            })
+        st.dataframe(pd.DataFrame(cols_info), use_container_width=True)
+    
+    # Raw data preview
+    st.subheader("📄 Raw Data Preview")
+    st.dataframe(df.head(20), use_container_width=True)
+
+# ==================== ANALYSIS TAB (BASIC + ADVANCED) ====================
+
+def render_analysis_tab():
+    """Render comprehensive analysis"""
+    st.header("📊 Analysis Dashboard")
+    
+    if st.session_state.df is None:
+        st.info("👆 Please upload a file first")
         return
     
-    df = st.session_state.df_cleaned
+    df = st.session_state.df
+    df_clean = st.session_state.df_cleaned
     
-    # Filters
-    st.subheader("Filter Work Orders")
+    # Choose which dataframe to use
+    use_df = df_clean if df_clean is not None else df
     
+    # Calculate metrics
+    metrics = calculate_failure_metrics(use_df)
+    
+    # Display metrics
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        if 'OpenDate' in df.columns:
-            date_range = st.date_input(
-                "Date Range",
-                value=(df['OpenDate'].min(), df['OpenDate'].max()),
-                key="failure_date"
-            )
-    
+        st.metric("Total Work Orders", f"{metrics['total_work_orders']:,}")
     with col2:
-        if 'VehicleID' in df.columns:
-            vehicles = st.multiselect(
-                "Vehicle ID",
-                options=df['VehicleID'].unique(),
-                key="failure_vehicle"
-            )
-    
+        st.metric("Completed", f"{metrics['completed']:,}", 
+                  f"{metrics['completion_rate']:.1f}%")
     with col3:
-        if 'Status' in df.columns:
-            status_filter = st.multiselect(
-                "Status",
-                options=df['Status'].unique(),
-                key="failure_status"
-            )
-    
+        st.metric("In Progress", f"{metrics['in_progress']:,}")
     with col4:
-        show_anomalies = st.checkbox("Show Anomalies Only", key="show_anomalies")
-    
-    # Apply filters
-    filtered_df = df.copy()
-    
-    if vehicles:
-        filtered_df = filtered_df[filtered_df['VehicleID'].isin(vehicles)]
-    
-    if status_filter:
-        filtered_df = filtered_df[filtered_df['Status'].isin(status_filter)]
-    
-    if show_anomalies:
-        anomaly_mask = (
-            filtered_df['RepeatFailureFlag'] | 
-            filtered_df['QuickReturnFlag'] |
-            filtered_df['HighCostFlag'] |
-            filtered_df['HighDowntimeFlag']
-        )
-        filtered_df = filtered_df[anomaly_mask]
-    
-    # Display filtered data
-    st.subheader(f"Work Orders ({len(filtered_df)} records)")
-    
-    # Highlight anomalies
-    def style_anomalies(row):
-        if row.get('RepeatFailureFlag') or row.get('QuickReturnFlag'):
-            return ['background-color: #ffcccc'] * len(row)
-        elif row.get('HighCostFlag') or row.get('HighDowntimeFlag'):
-            return ['background-color: #ffe5cc'] * len(row)
-        return [''] * len(row)
-    
-    styled = filtered_df.style.apply(style_anomalies, axis=1)
-    st.dataframe(styled, use_container_width=True, height=400)
-    
-    # Add new failure
-    st.subheader("Log New Failure")
-    
-    with st.form("new_failure_form"):
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            new_vehicle = st.text_input("Vehicle ID")
-            new_date = st.date_input("Failure Date")
-            new_status = st.selectbox("Status", ["Open", "In Progress", "Waiting Parts"])
-        
-        with col2:
-            new_failure_desc = st.text_area("Failure Description")
-            new_failure_mode = st.text_input("Failure Mode")
-        
-        with col3:
-            new_location = st.text_input("Location/Workshop")
-            new_cost = st.number_input("Estimated Cost", min_value=0.0)
-        
-        if st.form_submit_button("Submit Failure Report"):
-            new_failure = pd.DataFrame({
-                'WorkOrderID': [f"WO-{datetime.now().strftime('%Y%m%d%H%M%S')}"],
-                'VehicleID': [new_vehicle],
-                'OpenDate': [new_date],
-                'Status': [new_status],
-                'FailureDesc': [new_failure_desc],
-                'FailureMode': [new_failure_mode],
-                'Location': [new_location],
-                'TotalCost': [new_cost]
-            })
-            
-            st.session_state.new_failures = pd.concat(
-                [st.session_state.new_failures, new_failure],
-                ignore_index=True
-            )
-            
-            st.success("✅ Failure report submitted!")
-
-def render_analysis_tab():
-    """Failure analysis and RCA tools"""
-    st.header("📊 Failure Analysis & Root Cause")
-    
-    if st.session_state.df_cleaned is None:
-        st.warning("Please import and clean data first")
-        return
-    
-    df = st.session_state.df_cleaned
+        st.metric("Waiting Parts", f"{metrics['waiting_parts']:,}")
     
     # Analysis tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["Top Failures", "Trends", "Root Cause Analysis", "Component Analysis"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "🚗 Vehicles",
+        "🏭 Workshops",
+        "📈 Trends",
+        "🔧 Spare Parts",
+        "📋 Raw Data"
+    ])
     
     with tab1:
-        col1, col2 = st.columns(2)
+        st.subheader("🚗 Vehicle Analysis")
+        top_vehicles = identify_top_vehicles(use_df, limit=15)
         
-        # Top failure modes
-        with col1:
-            if 'FailureMode' in df.columns:
-                failure_counts = df['FailureMode'].value_counts().head(10)
-                
-                fig = px.bar(
-                    x=failure_counts.values,
-                    y=failure_counts.index,
-                    orientation='h',
-                    title="Top 10 Failure Modes",
-                    labels={'x': 'Count', 'y': 'Failure Mode'},
-                    color=failure_counts.values,
-                    color_continuous_scale='Reds'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-        
-        # Top vehicles
-        with col2:
-            if 'VehicleID' in df.columns:
-                vehicle_counts = df['VehicleID'].value_counts().head(10)
-                
-                fig = px.bar(
-                    x=vehicle_counts.values,
-                    y=vehicle_counts.index,
-                    orientation='h',
-                    title="Top 10 Vehicles by Failures",
-                    labels={'x': 'Count', 'y': 'Vehicle ID'},
-                    color=vehicle_counts.values,
-                    color_continuous_scale='Blues'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-        
-        # Location analysis
-        if 'Location' in df.columns:
-            location_counts = df['Location'].value_counts()
-            
-            fig = px.pie(
-                values=location_counts.values,
-                names=location_counts.index,
-                title="Failures by Location/Workshop"
-            )
-            st.plotly_chart(fig, use_container_width=True)
-    
-    with tab2:
-        # Monthly trend
-        if 'OpenDate' in df.columns:
-            df['Month'] = pd.to_datetime(df['OpenDate']).dt.to_period('M')
-            monthly_counts = df.groupby('Month').size()
-            
-            fig = px.line(
-                x=monthly_counts.index.astype(str),
-                y=monthly_counts.values,
-                title="Monthly Failure Trend",
-                labels={'x': 'Month', 'y': 'Failure Count'},
-                markers=True
-            )
-            
-            # Add average line
-            avg_failures = monthly_counts.mean()
-            fig.add_hline(
-                y=avg_failures,
-                line_dash="dash",
-                line_color="red",
-                annotation_text=f"Average: {avg_failures:.0f}"
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Severity trend if available
-            if 'Status' in df.columns:
-                status_trend = df.groupby(['Month', 'Status']).size().unstack(fill_value=0)
-                
-                fig = px.area(
-                    status_trend.T,
-                    title="Status Distribution Over Time",
-                    labels={'value': 'Count', 'index': 'Status'}
-                )
-                st.plotly_chart(fig, use_container_width=True)
-    
-    with tab3:
-        st.subheader("Root Cause Analysis Tools")
-        
-        # Select work order
-        if 'WorkOrderID' in df.columns:
-            selected_wo = st.selectbox(
-                "Select Work Order for RCA",
-                df['WorkOrderID'].unique()
-            )
-            
-            wo_details = df[df['WorkOrderID'] == selected_wo].iloc[0]
-            
-            # Show WO details
-            col1, col2 = st.columns([1, 2])
+        if top_vehicles is not None:
+            col1, col2 = st.columns(2)
             
             with col1:
-                st.write("**Work Order Details:**")
-                st.write(f"Vehicle: {wo_details.get('VehicleID', 'N/A')}")
-                st.write(f"Date: {wo_details.get('OpenDate', 'N/A')}")
-                st.write(f"Status: {wo_details.get('Status', 'N/A')}")
-                
-                if wo_details.get('RepeatFailureFlag'):
-                    st.error("⚠️ This is a REPEAT FAILURE")
+                fig = px.bar(
+                    x=top_vehicles.values,
+                    y=top_vehicles.index,
+                    orientation='h',
+                    title="Top 15 Vehicle Types by Work Orders",
+                    labels={'x': 'Number of Work Orders', 'y': 'Vehicle Type'},
+                    color=top_vehicles.values,
+                    color_continuous_scale='Blues'
+                )
+                # Truncate long names
+                fig.update_yaxes(ticktext=[name[:40] + '...' if len(str(name)) > 40 else name 
+                                           for name in top_vehicles.index])
+                st.plotly_chart(fig, use_container_width=True)
             
             with col2:
-                # 5-Whys Analysis
-                st.write("**5-Whys Analysis**")
+                st.markdown("### 📊 Vehicle Statistics")
+                total_vehicles = use_df['Vehicle Make and Model'].nunique() if 'Vehicle Make and Model' in use_df.columns else 0
+                st.metric("Total Unique Vehicles", f"{total_vehicles:,}")
                 
-                with st.form(f"five_whys_{selected_wo}"):
-                    why1 = st.text_input("Why 1: Why did this failure occur?")
-                    why2 = st.text_input("Why 2: Why did that happen?")
-                    why3 = st.text_input("Why 3: Why?")
-                    why4 = st.text_input("Why 4: Why?")
-                    why5 = st.text_input("Why 5: Root Cause")
-                    
-                    if st.form_submit_button("Save 5-Whys"):
-                        rca_entry = pd.DataFrame({
-                            'WorkOrderID': [selected_wo],
-                            'Type': ['5-Whys'],
-                            'Content': [f"1:{why1}\n2:{why2}\n3:{why3}\n4:{why4}\n5:{why5}"],
-                            'Timestamp': [datetime.now()],
-                            'User': [st.session_state.user_role]
-                        })
-                        
-                        st.session_state.rca_data = pd.concat(
-                            [st.session_state.rca_data, rca_entry],
-                            ignore_index=True
-                        )
-                        st.success("✅ 5-Whys analysis saved!")
-            
-            # Ishikawa Diagram
-            st.write("**Ishikawa (Fishbone) Analysis**")
-            
-            with st.form(f"ishikawa_{selected_wo}"):
-                col1, col2, col3 = st.columns(3)
+                avg_per_vehicle = len(use_df) / total_vehicles if total_vehicles > 0 else 0
+                st.metric("Avg Work Orders per Vehicle", f"{avg_per_vehicle:.1f}")
                 
-                with col1:
-                    man = st.text_area("Man (People)", help="Skills, training, fatigue")
-                    machine = st.text_area("Machine", help="Equipment, tools, maintenance")
-                
-                with col2:
-                    method = st.text_area("Method", help="Procedures, standards")
-                    material = st.text_area("Material", help="Quality, availability")
-                
-                with col3:
-                    measurement = st.text_area("Measurement", help="Accuracy, calibration")
-                    environment = st.text_area("Environment", help="Temperature, humidity, location")
-                
-                if st.form_submit_button("Save Ishikawa Analysis"):
-                    ishikawa_content = f"""
-                    Man: {man}
-                    Machine: {machine}
-                    Method: {method}
-                    Material: {material}
-                    Measurement: {measurement}
-                    Environment: {environment}
-                    """
-                    
-                    rca_entry = pd.DataFrame({
-                        'WorkOrderID': [selected_wo],
-                        'Type': ['Ishikawa'],
-                        'Content': [ishikawa_content],
-                        'Timestamp': [datetime.now()],
-                        'User': [st.session_state.user_role]
-                    })
-                    
-                    st.session_state.rca_data = pd.concat(
-                        [st.session_state.rca_data, rca_entry],
-                        ignore_index=True
-                    )
-                    st.success("✅ Ishikawa analysis saved!")
+                # Top 3 vehicles
+                st.markdown("### 🏆 Top 3 Vehicles")
+                for i, (vehicle, count) in enumerate(top_vehicles.head(3).items(), 1):
+                    vehicle_name = str(vehicle)[:50] + '...' if len(str(vehicle)) > 50 else str(vehicle)
+                    st.info(f"**{i}. {vehicle_name}**\n{count} work orders")
+        else:
+            st.warning("Vehicle data not available")
     
-    with tab4:
-        # Component/Subsystem analysis
-        st.subheader("Component Recurrence Analysis")
+    with tab2:
+        st.subheader("🏭 Workshop Analysis")
         
-        if 'Subsystem' in df.columns or 'FailureMode' in df.columns:
-            # Use FailureMode as proxy for component if Subsystem not available
-            component_col = 'Subsystem' if 'Subsystem' in df.columns else 'FailureMode'
+        workshop_data = analyze_by_workshop(use_df)
+        sector_data = analyze_by_sector(use_df)
+        
+        if workshop_data is not None:
+            col1, col2 = st.columns(2)
             
-            # Calculate recurrence
-            component_stats = df.groupby(component_col).agg({
-                'WorkOrderID': 'count',
-                'RepeatFailureFlag': 'sum' if 'RepeatFailureFlag' in df.columns else 'count'
-            }).rename(columns={'WorkOrderID': 'TotalFailures', 'RepeatFailureFlag': 'RepeatFailures'})
-            
-            if 'RepeatFailureFlag' in df.columns:
-                component_stats['RepeatRate'] = (component_stats['RepeatFailures'] / component_stats['TotalFailures'] * 100)
-                component_stats = component_stats.sort_values('RepeatRate', ascending=False).head(15)
-                
-                # Heatmap of repeat failures
+            with col1:
+                # Top workshops
                 fig = px.bar(
-                    component_stats,
-                    y=component_stats.index,
-                    x='RepeatRate',
+                    x=workshop_data.head(15).values,
+                    y=[name[:30] + '...' if len(name) > 30 else name for name in workshop_data.head(15).index],
                     orientation='h',
-                    title="Component Repeat Failure Rate (%)",
-                    color='RepeatRate',
-                    color_continuous_scale='Reds',
-                    labels={'RepeatRate': 'Repeat Rate (%)'}
+                    title="Top 15 Workshops by Workload",
+                    labels={'x': 'Work Orders', 'y': 'Workshop'},
+                    color=workshop_data.head(15).values,
+                    color_continuous_scale='Viridis'
                 )
                 st.plotly_chart(fig, use_container_width=True)
-                
-                # Show detailed table
-                st.dataframe(component_stats, use_container_width=True)
-
-def render_capa_tab():
-    """CAPA management interface"""
-    st.header("📋 CAPA - Corrective and Preventive Actions")
+            
+            with col2:
+                st.markdown("### 📊 Workshop Statistics")
+                st.metric("Total Workshops", len(workshop_data))
+                st.metric("Avg Work Orders per Workshop", f"{workshop_data.mean():.1f}")
+                st.metric("Most Busy Workshop", 
+                          f"{str(workshop_data.index[0])[:40]}..." if len(str(workshop_data.index[0])) > 40 else str(workshop_data.index[0]))
+                st.metric("Work Orders", workshop_data.iloc[0])
+        
+        if sector_data is not None:
+            st.subheader("🌍 Sector Distribution")
+            fig = px.pie(
+                values=sector_data.values,
+                names=sector_data.index,
+                title="Work Orders by Sector"
+            )
+            st.plotly_chart(fig, use_container_width=True)
     
-    # CAPA entry form
-    with st.form("capa_form"):
+    with tab3:
+        st.subheader("📈 Trend Analysis")
+        
+        trend_data, status_trends = create_trend_analysis(use_df)
+        
+        if trend_data is not None:
+            # Convert period to string for plotting
+            trend_df = pd.DataFrame({
+                'Month': [str(m) for m in trend_data.index],
+                'Work Orders': trend_data.values
+            })
+            
+            fig = px.line(
+                trend_df,
+                x='Month',
+                y='Work Orders',
+                title="Work Orders Over Time",
+                markers=True
+            )
+            fig.update_layout(xaxis_tickangle=-45)
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Status trends
+            if status_trends is not None:
+                st.subheader("📊 Status Trends Over Time")
+                
+                # Prepare data for stacked area chart
+                status_trends_reset = status_trends.reset_index()
+                status_trends_reset['month'] = status_trends_reset['month'].astype(str)
+                
+                fig = go.Figure()
+                for col in status_trends.columns:
+                    fig.add_trace(go.Scatter(
+                        x=status_trends_reset['month'],
+                        y=status_trends_reset[col],
+                        name=col,
+                        mode='lines',
+                        stackgroup='one'
+                    ))
+                
+                fig.update_layout(
+                    title="Work Order Status Trends",
+                    xaxis_title="Month",
+                    yaxis_title="Count",
+                    hovermode='x unified'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("Date information not available for trend analysis")
+    
+    with tab4:
+        st.subheader("🔧 Spare Parts Analysis")
+        
+        spare_results = analyze_spare_parts(use_df)
+        
+        if spare_results and 'required' in spare_results:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig = px.pie(
+                    values=spare_results['required'].values,
+                    names=spare_results['required'].index,
+                    title="Spare Parts Required Distribution",
+                    color_discrete_map={'Yes / نعم': '#ff4444', 'No / لا': '#44ff44'}
+                )
+                fig.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                st.markdown("### 📊 Spare Parts Metrics")
+                total = len(use_df)
+                yes_count = spare_results['required'].get('Yes / نعم', spare_results['required'].get('Yes', 0))
+                no_count = spare_results['required'].get('No / لا', spare_results['required'].get('No', 0))
+                
+                st.metric("Require Spare Parts", f"{yes_count:,}", 
+                          f"{(yes_count/total*100):.1f}%")
+                st.metric("No Spare Parts Needed", f"{no_count:,}",
+                          f"{(no_count/total*100):.1f}%")
+                
+                if 'received_count' in spare_results:
+                    st.metric("Spare Parts Received", 
+                              f"{spare_results['received_count']:,}",
+                              f"{(spare_results['received_count']/yes_count*100):.1f}% of required" if yes_count > 0 else "N/A")
+        else:
+            st.warning("Spare parts data not available")
+    
+    with tab5:
+        st.subheader("📋 Raw Data Viewer")
+        
+        # Filters
         col1, col2, col3 = st.columns(3)
         
         with col1:
-            action_id = f"CAPA-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            st.text_input("Action ID", value=action_id, disabled=True)
-            
-            # Link to work order if available
-            wo_link = st.text_input("Linked Work Order ID")
-            description = st.text_area("Action Description")
+            search_term = st.text_input("🔍 Search all columns", "")
         
         with col2:
-            owner = st.text_input("Owner")
-            due_date = st.date_input("Due Date")
-            action_type = st.selectbox("Type", ["Corrective", "Preventive"])
+            status_col = 'Work order status' if 'Work order status' in use_df.columns else 'Status'
+            if status_col in use_df.columns:
+                status_filter = st.selectbox(
+                    "Filter by Status",
+                    ["All"] + list(use_df[status_col].unique())
+                )
+            else:
+                status_filter = "All"
         
         with col3:
-            priority = st.selectbox("Priority", ["Critical", "High", "Medium", "Low"])
-            status = st.selectbox("Status", ["Open", "In Progress", "Pending Review", "Closed"])
+            workshop_col = 'Workshop name' if 'Workshop name' in use_df.columns else 'Location'
+            if workshop_col in use_df.columns:
+                unique_workshops = list(use_df[workshop_col].unique()[:20])
+                workshop_filter = st.selectbox(
+                    "Filter by Workshop",
+                    ["All"] + unique_workshops
+                )
+            else:
+                workshop_filter = "All"
         
-        if st.form_submit_button("Create CAPA"):
-            new_capa = pd.DataFrame({
-                'ActionID': [action_id],
-                'WorkOrderID': [wo_link],
-                'Description': [description],
-                'Owner': [owner],
-                'DueDate': [due_date],
-                'Status': [status],
-                'EffectivenessCheck': ['Pending'],
-                'ClosureDate': [None]
-            })
-            
-            st.session_state.capa_register = pd.concat(
-                [st.session_state.capa_register, new_capa],
-                ignore_index=True
+        # Column selector
+        all_columns = list(use_df.columns)
+        default_cols = ['ID', 'Date', 'Work order status', 'Vehicle Make and Model', 
+                        'Workshop name', 'Spare parts Required', 'Status', 'VehicleID', 'OpenDate']
+        default_cols = [col for col in default_cols if col in all_columns]
+        
+        selected_columns = st.multiselect(
+            "Select columns to display",
+            all_columns,
+            default=default_cols[:min(8, len(default_cols))] if default_cols else all_columns[:8]
+        )
+        
+        # Apply filters
+        filtered_df = use_df.copy()
+        
+        if search_term:
+            mask = filtered_df.astype(str).apply(
+                lambda x: x.str.contains(search_term, case=False, na=False)
+            ).any(axis=1)
+            filtered_df = filtered_df[mask]
+        
+        status_col = 'Work order status' if 'Work order status' in use_df.columns else 'Status'
+        if status_filter != "All" and status_col in use_df.columns:
+            filtered_df = filtered_df[filtered_df[status_col] == status_filter]
+        
+        workshop_col = 'Workshop name' if 'Workshop name' in use_df.columns else 'Location'
+        if workshop_filter != "All" and workshop_col in use_df.columns:
+            filtered_df = filtered_df[filtered_df[workshop_col] == workshop_filter]
+        
+        # Display
+        if selected_columns:
+            st.dataframe(
+                filtered_df[selected_columns],
+                use_container_width=True,
+                height=600
             )
-            st.success(f"✅ CAPA {action_id} created!")
-    
-    # CAPA register display
-    st.subheader("CAPA Register")
-    
-    if not st.session_state.capa_register.empty:
-        # Metrics
-        col1, col2, col3, col4 = st.columns(4)
+        else:
+            st.warning("Please select at least one column to display")
         
-        capa_df = st.session_state.capa_register
+        # Download
+        col1, col2 = st.columns(2)
         
         with col1:
-            st.metric("Total CAPAs", len(capa_df))
+            st.info(f"Showing {len(filtered_df):,} of {len(use_df):,} total work orders")
         
         with col2:
-            open_capas = len(capa_df[capa_df['Status'].isin(['Open', 'In Progress'])])
-            st.metric("Open Actions", open_capas)
-        
-        with col3:
-            # Check for overdue
-            capa_df['DueDate'] = pd.to_datetime(capa_df['DueDate'])
-            overdue = len(capa_df[
-                (capa_df['DueDate'] < datetime.now()) & 
-                (capa_df['Status'] != 'Closed')
-            ])
-            st.metric("Overdue", overdue, delta_color="inverse")
-        
-        with col4:
-            # CAPA effectiveness
-            if st.session_state.df_cleaned is not None:
-                # Check for failures after CAPA closure
-                ineffective_capas = 0
-                
-                for idx, capa in capa_df[capa_df['Status'] == 'Closed'].iterrows():
-                    if pd.notna(capa.get('WorkOrderID')):
-                        # Check if similar failures occurred after CAPA closure
-                        wo_data = st.session_state.df_cleaned[
-                            st.session_state.df_cleaned['WorkOrderID'] == capa['WorkOrderID']
-                        ]
-                        
-                        if not wo_data.empty:
-                            vehicle = wo_data.iloc[0].get('VehicleID')
-                            failure_mode = wo_data.iloc[0].get('FailureMode')
-                            
-                            # Check for recurrence
-                            if vehicle and failure_mode and capa.get('ClosureDate'):
-                                recurring = st.session_state.df_cleaned[
-                                    (st.session_state.df_cleaned['VehicleID'] == vehicle) &
-                                    (st.session_state.df_cleaned['FailureMode'] == failure_mode) &
-                                    (st.session_state.df_cleaned['OpenDate'] > capa['ClosureDate'])
-                                ]
-                                
-                                if not recurring.empty:
-                                    ineffective_capas += 1
-                                    capa_df.at[idx, 'EffectivenessCheck'] = 'Failed'
-                
-                effectiveness_rate = (1 - ineffective_capas / len(capa_df[capa_df['Status'] == 'Closed'])) * 100 if len(capa_df[capa_df['Status'] == 'Closed']) > 0 else 100
-                st.metric("CAPA Effectiveness", f"{effectiveness_rate:.1f}%")
-        
-        # Highlight overdue items
-        def highlight_overdue(row):
-            if row['Status'] != 'Closed' and pd.to_datetime(row['DueDate']) < datetime.now():
-                return ['background-color: #ffcccc'] * len(row)
-            elif row.get('EffectivenessCheck') == 'Failed':
-                return ['background-color: #ffe5cc'] * len(row)
-            return [''] * len(row)
-        
-        styled_capa = capa_df.style.apply(highlight_overdue, axis=1)
-        st.dataframe(styled_capa, use_container_width=True)
-        
-        # Export CAPA register
-        csv = capa_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "📥 Download CAPA Register",
-            csv,
-            "capa_register.csv",
-            "text/csv"
-        )
+            csv = filtered_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Filtered Data (CSV)",
+                data=csv,
+                file_name=f"fracas_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+
+# ==================== RELIABILITY TAB ====================
 
 def render_reliability_tab():
-    """Reliability KPIs dashboard"""
+    """Render reliability metrics"""
     st.header("📈 Reliability Metrics")
     
     if st.session_state.df_cleaned is None:
-        st.warning("Please import and clean data first")
+        st.info("Process data first to see reliability metrics")
         return
     
     df = st.session_state.df_cleaned
+    metrics = calculate_reliability_metrics(df)
     
-    # KPI calculation settings
-    col1, col2 = st.columns([3, 1])
+    if not metrics:
+        st.warning("Insufficient data for reliability calculations")
+        return
     
-    with col2:
-        mtbf_base = st.selectbox(
-            "MTBF Base",
-            ["days", "hours"],
-            help="Base unit for MTBF calculation"
-        )
-        
-        window_days = st.number_input(
-            "Analysis Window (days)",
-            min_value=7,
-            max_value=365,
-            value=30
-        )
-    
-    # Calculate KPIs
-    mtbf_overall = calculate_mtbf(df, base=mtbf_base)
-    mttr_overall = calculate_mttr(df)
-    availability = calculate_availability(df, window_days)
-    
-    # Display KPI cards
-    col1, col2, col3, col4 = st.columns(4)
+    # Display metrics
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        mtbf_value = mtbf_overall['MTBF'].mean() if not mtbf_overall.empty else 0
-        st.metric(
-            f"MTBF ({mtbf_base})",
-            f"{mtbf_value:.1f}",
-            help="Mean Time Between Failures"
-        )
+        if 'MTBF' in metrics:
+            st.metric("MTBF (Mean Time Between Failures)", f"{metrics['MTBF']:.1f} hrs")
+            st.caption(f"Median: {metrics['MTBF_median']:.1f} hrs")
     
     with col2:
-        mttr_value = mttr_overall['MTTR'].mean() if not mttr_overall.empty else 0
-        st.metric(
-            "MTTR (hours)",
-            f"{mttr_value:.1f}",
-            help="Mean Time To Repair"
-        )
+        if 'MTTR' in metrics:
+            st.metric("MTTR (Mean Time To Repair)", f"{metrics['MTTR']:.1f} hrs")
+            st.caption(f"Median: {metrics['MTTR_median']:.1f} hrs")
     
     with col3:
-        if mtbf_value > 0:
-            failure_rate = 1 / mtbf_value
-            st.metric(
-                "Failure Rate",
-                f"{failure_rate:.4f}",
-                help=f"Failures per {mtbf_base}"
-            )
-        else:
-            st.metric("Failure Rate", "N/A")
+        if 'Availability' in metrics:
+            st.metric("Availability", f"{metrics['Availability']:.2f}%")
+            reliability_status = "Excellent" if metrics['Availability'] > 95 else "Good" if metrics['Availability'] > 90 else "Needs Improvement"
+            st.caption(f"Status: {reliability_status}")
     
-    with col4:
-        st.metric(
-            "Availability (%)",
-            f"{availability:.1f}",
-            help=f"Over {window_days} days"
+    # Visualization
+    if 'RepairDuration' in df.columns:
+        st.subheader("⏱️ Repair Duration Distribution")
+        
+        fig = px.histogram(
+            df[df['RepairDuration'].notna()],
+            x='RepairDuration',
+            nbins=50,
+            title="Repair Duration Distribution",
+            labels={'RepairDuration': 'Repair Duration (hours)'}
         )
-    
-    # Detailed analysis
-    tab1, tab2, tab3 = st.tabs(["MTBF Analysis", "MTTR Analysis", "Reliability Trends"])
-    
-    with tab1:
-        if 'VehicleID' in df.columns:
-            vehicle_mtbf = calculate_mtbf(df, group_by='VehicleID', base=mtbf_base)
-            
-            if not vehicle_mtbf.empty:
-                # Best and worst performers
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    top_vehicles = vehicle_mtbf.nlargest(10, 'MTBF')
-                    
-                    fig = px.bar(
-                        top_vehicles,
-                        x='MTBF',
-                        y='Group',
-                        orientation='h',
-                        title=f"Top 10 Vehicles - MTBF ({mtbf_base})",
-                        color='MTBF',
-                        color_continuous_scale='Greens'
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                with col2:
-                    bottom_vehicles = vehicle_mtbf.nsmallest(10, 'MTBF')
-                    
-                    fig = px.bar(
-                        bottom_vehicles,
-                        x='MTBF',
-                        y='Group',
-                        orientation='h',
-                        title=f"Bottom 10 Vehicles - MTBF ({mtbf_base})",
-                        color='MTBF',
-                        color_continuous_scale='Reds'
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-    
-    with tab2:
-        if 'VehicleID' in df.columns:
-            vehicle_mttr = calculate_mttr(df, group_by='VehicleID')
-            
-            if not vehicle_mttr.empty:
-                # MTTR distribution
-                fig = px.histogram(
-                    vehicle_mttr,
-                    x='MTTR',
-                    nbins=30,
-                    title="MTTR Distribution (hours)",
-                    labels={'MTTR': 'MTTR (hours)', 'count': 'Number of Vehicles'}
-                )
-                
-                # Add mean line
-                mean_mttr = vehicle_mttr['MTTR'].mean()
-                fig.add_vline(
-                    x=mean_mttr,
-                    line_dash="dash",
-                    line_color="red",
-                    annotation_text=f"Mean: {mean_mttr:.1f}"
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Longest repair times
-                longest_repairs = vehicle_mttr.nlargest(10, 'MTTR')
-                
-                fig = px.bar(
-                    longest_repairs,
-                    x='MTTR',
-                    y='Group',
-                    orientation='h',
-                    title="Vehicles with Longest Repair Times",
-                    color='MTTR',
-                    color_continuous_scale='Oranges'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-    
-    with tab3:
-        if 'OpenDate' in df.columns:
-            # Calculate monthly reliability metrics
-            df['Month'] = pd.to_datetime(df['OpenDate']).dt.to_period('M')
-            
-            monthly_metrics = []
-            for month in df['Month'].unique():
-                month_df = df[df['Month'] == month]
-                
-                month_mtbf = calculate_mtbf(month_df, base=mtbf_base)
-                month_mttr = calculate_mttr(month_df)
-                
-                monthly_metrics.append({
-                    'Month': str(month),
-                    'MTBF': month_mtbf['MTBF'].mean() if not month_mtbf.empty else 0,
-                    'MTTR': month_mttr['MTTR'].mean() if not month_mttr.empty else 0,
-                    'FailureCount': len(month_df)
-                })
-            
-            metrics_df = pd.DataFrame(monthly_metrics)
-            
-            # Create subplots
-            fig = make_subplots(
-                rows=2, cols=2,
-                subplot_titles=('MTBF Trend', 'MTTR Trend', 'Failure Count', 'Combined View')
-            )
-            
-            # MTBF trend
-            fig.add_trace(
-                go.Scatter(x=metrics_df['Month'], y=metrics_df['MTBF'], mode='lines+markers', name='MTBF'),
-                row=1, col=1
-            )
-            
-            # MTTR trend
-            fig.add_trace(
-                go.Scatter(x=metrics_df['Month'], y=metrics_df['MTTR'], mode='lines+markers', name='MTTR'),
-                row=1, col=2
-            )
-            
-            # Failure count
-            fig.add_trace(
-                go.Bar(x=metrics_df['Month'], y=metrics_df['FailureCount'], name='Failures'),
-                row=2, col=1
-            )
-            
-            # Combined view
-            fig2 = make_subplots(specs=[[{"secondary_y": True}]])
-            fig2.add_trace(
-                go.Scatter(x=metrics_df['Month'], y=metrics_df['MTBF'], mode='lines', name='MTBF'),
-                secondary_y=False
-            )
-            fig2.add_trace(
-                go.Scatter(x=metrics_df['Month'], y=metrics_df['MTTR'], mode='lines', name='MTTR'),
-                secondary_y=True
-            )
-            
-            fig.update_layout(height=600, title_text="Reliability Metrics Over Time")
-            st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
+
+# ==================== ANOMALIES TAB ====================
 
 def render_anomalies_tab():
-    """Anomaly detection and monitoring"""
-    st.header("⚠️ Anomaly Detection & Monitoring")
+    """Render anomalies detection"""
+    st.header("⚠️ Anomaly Detection")
     
-    if st.session_state.df_cleaned is None:
-        st.warning("Please import and clean data first")
+    if st.session_state.anomalies.empty:
+        st.success("✓ No anomalies detected!")
         return
     
-    df = st.session_state.df_cleaned
-    anomalies_df = st.session_state.anomalies
+    anomalies = st.session_state.anomalies
     
-    # Anomaly summary cards
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # Summary
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        repeat_count = df['RepeatFailureFlag'].sum() if 'RepeatFailureFlag' in df.columns else 0
-        st.metric("Repeat Failures", repeat_count, delta_color="inverse")
-    
+        st.metric("Total Anomalies", len(anomalies))
     with col2:
-        quick_return = df['QuickReturnFlag'].sum() if 'QuickReturnFlag' in df.columns else 0
-        st.metric("Quick Returns", quick_return, delta_color="inverse")
-    
+        high_severity = len(anomalies[anomalies['Severity'] == 'High'])
+        st.metric("High Severity", high_severity, 
+                  delta="Requires immediate attention" if high_severity > 0 else None,
+                  delta_color="inverse")
     with col3:
-        high_cost = df['HighCostFlag'].sum() if 'HighCostFlag' in df.columns else 0
-        st.metric("High Cost", high_cost, delta_color="inverse")
+        anomaly_types = anomalies['Type'].nunique()
+        st.metric("Anomaly Types", anomaly_types)
     
-    with col4:
-        high_downtime = df['HighDowntimeFlag'].sum() if 'HighDowntimeFlag' in df.columns else 0
-        st.metric("High Downtime", high_downtime, delta_color="inverse")
+    # Anomalies by type
+    st.subheader("📊 Anomalies by Type")
     
-    with col5:
-        total_anomalies = len(anomalies_df) if anomalies_df is not None else 0
-        st.metric("Total Anomalies", total_anomalies, delta_color="inverse")
+    type_counts = anomalies['Type'].value_counts()
+    fig = px.bar(
+        x=type_counts.values,
+        y=type_counts.index,
+        orientation='h',
+        title="Anomalies by Type",
+        color=type_counts.values,
+        color_continuous_scale='Reds'
+    )
+    st.plotly_chart(fig, use_container_width=True)
     
-    # Anomaly details tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["Active Anomalies", "Repeat Failures", "Quick Returns", "Component Recurrence"])
+    # Detailed table
+    st.subheader("📋 Anomaly Details")
     
-    with tab1:
-        st.subheader("All Active Anomalies")
-        
-        if anomalies_df is not None and not anomalies_df.empty:
-            # Group by type
-            anomaly_summary = anomalies_df.groupby(['Type', 'Severity']).size().reset_index(name='Count')
-            
-            # Pie chart of anomaly types
-            fig = px.pie(
-                anomaly_summary,
-                values='Count',
-                names='Type',
-                title="Anomaly Distribution by Type",
-                color_discrete_map={
-                    'Repeat Failure': '#ff4444',
-                    'Quick Return': '#ff8844',
-                    'High Cost': '#ffaa44',
-                    'High Downtime': '#ffcc44',
-                    'High Frequency': '#ff6644'
-                }
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Detailed anomaly table
-            st.subheader("Anomaly Details")
-            
-            # Color code by severity
-            def style_severity(row):
-                if row['Severity'] == 'High':
-                    return ['background-color: #ffcccc'] * len(row)
-                elif row['Severity'] == 'Medium':
-                    return ['background-color: #ffe5cc'] * len(row)
-                return [''] * len(row)
-            
-            styled_anomalies = anomalies_df.style.apply(style_severity, axis=1)
-            st.dataframe(styled_anomalies, use_container_width=True)
-            
-            # Export anomalies
-            csv = anomalies_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "📥 Download Anomaly Report",
-                csv,
-                "anomaly_report.csv",
-                "text/csv"
-            )
+    # Severity filter
+    severity_filter = st.multiselect(
+        "Filter by Severity",
+        ['High', 'Medium', 'Low'],
+        default=['High', 'Medium']
+    )
+    
+    filtered_anomalies = anomalies[anomalies['Severity'].isin(severity_filter)]
+    
+    # Style the dataframe
+    def highlight_severity(row):
+        if row['Severity'] == 'High':
+            return ['background-color: #ffcccc'] * len(row)
+        elif row['Severity'] == 'Medium':
+            return ['background-color: #ffe5cc'] * len(row)
         else:
-            st.info("No anomalies detected")
+            return ['background-color: #ffffcc'] * len(row)
     
-    with tab2:
-        st.subheader("Repeat Failure Analysis")
-        
-        repeat_failures = df[df['RepeatFailureFlag'] == True] if 'RepeatFailureFlag' in df.columns else pd.DataFrame()
-        
-        if not repeat_failures.empty:
-            # Repeat failure patterns
-            if 'VehicleID' in repeat_failures.columns and 'FailureMode' in repeat_failures.columns:
-                repeat_patterns = repeat_failures.groupby(['VehicleID', 'FailureMode']).size().reset_index(name='Count')
-                repeat_patterns = repeat_patterns.sort_values('Count', ascending=False).head(20)
-                
-                # Heatmap of repeat failures
-                if len(repeat_patterns) > 0:
-                    pivot_table = repeat_patterns.pivot(index='VehicleID', columns='FailureMode', values='Count').fillna(0)
-                    
-                    fig = px.imshow(
-                        pivot_table,
-                        title="Repeat Failure Heatmap",
-                        labels={'x': 'Failure Mode', 'y': 'Vehicle ID', 'color': 'Repeat Count'},
-                        color_continuous_scale='Reds'
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                # Table of repeat patterns
-                st.dataframe(repeat_patterns, use_container_width=True)
-        else:
-            st.info("No repeat failures detected")
+    styled_df = filtered_anomalies.style.apply(highlight_severity, axis=1)
+    st.dataframe(styled_df, use_container_width=True, height=400)
     
-    with tab3:
-        st.subheader("Quick Return Analysis")
-        
-        quick_returns = df[df['QuickReturnFlag'] == True] if 'QuickReturnFlag' in df.columns else pd.DataFrame()
-        
-        if not quick_returns.empty:
-            # Days between failures distribution
-            if 'DaysSinceLastFailure' in quick_returns.columns:
-                fig = px.histogram(
-                    quick_returns,
-                    x='DaysSinceLastFailure',
-                    nbins=20,
-                    title="Days Between Failures for Quick Returns",
-                    labels={'DaysSinceLastFailure': 'Days', 'count': 'Number of Occurrences'}
-                )
-                
-                # Add threshold line
-                fig.add_vline(
-                    x=st.session_state.anomaly_thresholds['quick_return_days'],
-                    line_dash="dash",
-                    line_color="red",
-                    annotation_text="Threshold"
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-            
-            # Vehicles with most quick returns
-            if 'VehicleID' in quick_returns.columns:
-                vehicle_quick_returns = quick_returns['VehicleID'].value_counts().head(10)
-                
-                fig = px.bar(
-                    x=vehicle_quick_returns.values,
-                    y=vehicle_quick_returns.index,
-                    orientation='h',
-                    title="Vehicles with Most Quick Returns",
-                    labels={'x': 'Count', 'y': 'Vehicle ID'},
-                    color=vehicle_quick_returns.values,
-                    color_continuous_scale='Oranges'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No quick returns detected")
+    # Download
+    csv = filtered_anomalies.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download Anomalies Report",
+        data=csv,
+        file_name=f"anomalies_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
+
+# ==================== FAILURES TAB (PLACEHOLDER) ====================
+
+def render_failures_tab():
+    """Render failure reporting"""
+    st.header("📝 Failure Reporting")
+    st.info("This section can be used to log new failures")
     
-    with tab4:
-        st.subheader("Component Recurrence Tracking")
+    # Simple failure entry form
+    with st.form("new_failure_form"):
+        col1, col2 = st.columns(2)
         
-        if 'FailureMode' in df.columns:
-            # Calculate recurrence metrics
-            component_metrics = df.groupby('FailureMode').agg({
-                'WorkOrderID': 'count',
-                'RepeatFailureFlag': lambda x: x.sum() if 'RepeatFailureFlag' in df.columns else 0,
-                'TotalCost': lambda x: x.sum() if 'TotalCost' in df.columns else 0
-            }).rename(columns={
-                'WorkOrderID': 'TotalOccurrences',
-                'RepeatFailureFlag': 'RepeatCount',
-                'TotalCost': 'TotalCost'
-            })
-            
-            component_metrics['RecurrenceRate'] = (
-                component_metrics['RepeatCount'] / component_metrics['TotalOccurrences'] * 100
-            )
-            
-            # Sort by recurrence rate
-            component_metrics = component_metrics.sort_values('RecurrenceRate', ascending=False).head(15)
-            
-            # Bar chart of recurrence rates
-            fig = px.bar(
-                component_metrics,
-                y=component_metrics.index,
-                x='RecurrenceRate',
-                orientation='h',
-                title="Component Recurrence Rates (%)",
-                color='RecurrenceRate',
-                color_continuous_scale='Reds',
-                labels={'RecurrenceRate': 'Recurrence Rate (%)'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Detailed table
-            st.dataframe(component_metrics, use_container_width=True)
+        with col1:
+            vehicle_id = st.text_input("Vehicle ID")
+            failure_mode = st.text_input("Failure Mode")
+        
+        with col2:
+            location = st.text_input("Location/Workshop")
+            severity = st.selectbox("Severity", ["Low", "Medium", "High", "Critical"])
+        
+        description = st.text_area("Failure Description")
+        
+        submitted = st.form_submit_button("Submit Failure Report")
+        
+        if submitted:
+            st.success("✓ Failure report logged!")
+
+# ==================== CAPA TAB (PLACEHOLDER) ====================
+
+def render_capa_tab():
+    """Render CAPA management"""
+    st.header("📋 CAPA - Corrective & Preventive Actions")
+    st.info("This section can be used to track corrective and preventive actions")
+    
+    # Display existing CAPAs if any
+    if not st.session_state.capa_register.empty:
+        st.dataframe(st.session_state.capa_register, use_container_width=True)
+    else:
+        st.info("No CAPA actions registered yet")
+
+# ==================== COSTS TAB ====================
 
 def render_costs_tab():
-    """Cost and performance analysis"""
-    st.header("💰 Cost & Performance Analysis")
+    """Render cost analysis"""
+    st.header("💰 Cost Analysis")
     
     if st.session_state.df_cleaned is None:
-        st.warning("Please import and clean data first")
+        st.info("Process data first to see cost analysis")
         return
     
     df = st.session_state.df_cleaned
     
-    # Check if cost data is available
-    has_cost = 'TotalCost' in df.columns or 'LaborCost' in df.columns or 'PartCost' in df.columns
-    
-    if not has_cost:
-        st.warning("Cost data not available in dataset")
+    # Check if cost data exists
+    if 'TotalCost' not in df.columns and 'LaborCost' not in df.columns and 'PartCost' not in df.columns:
+        st.warning("Cost data not available in the dataset")
         
-        # Option to generate sample cost data
-        if st.checkbox("Generate sample cost data for demonstration"):
+        if st.button("Generate Demo Cost Data"):
+            st.info("Generating random cost data for demonstration...")
             df['TotalCost'] = np.random.uniform(100, 5000, len(df))
             df['DowntimeHours'] = np.random.uniform(1, 48, len(df))
             st.session_state.df_cleaned = df
@@ -1527,147 +1150,40 @@ def render_costs_tab():
             st.metric("Cost per Downtime Hour", f"${cost_per_hour:,.2f}")
     
     # Cost analysis tabs
-    tab1, tab2, tab3 = st.tabs(["Pareto Analysis", "Cost vs Downtime", "High Cost Failures"])
+    tab1, tab2 = st.tabs(["📊 Cost Distribution", "💸 High Cost Analysis"])
     
     with tab1:
-        st.subheader("Pareto Analysis (80/20 Rule)")
+        st.subheader("Cost Distribution")
         
-        # Choose grouping
-        group_by = st.selectbox(
-            "Group by",
-            ['VehicleID', 'FailureMode', 'Location', 'Subsystem']
-        )
-        
-        if group_by in df.columns and 'TotalCost' in df.columns:
-            # Calculate Pareto
-            cost_by_group = df.groupby(group_by)['TotalCost'].sum().sort_values(ascending=False)
-            
-            # Calculate cumulative percentage
-            cumulative_sum = cost_by_group.cumsum()
-            cumulative_percent = (cumulative_sum / cost_by_group.sum() * 100)
-            
-            # Find 80% threshold
-            threshold_idx = (cumulative_percent <= 80).sum()
-            
-            st.info(f"**Pareto Principle:** Top {threshold_idx} {group_by}s ({threshold_idx/len(cost_by_group)*100:.1f}%) account for 80% of costs")
-            
-            # Create Pareto chart
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
-            
-            # Bar chart
-            fig.add_trace(
-                go.Bar(
-                    x=list(range(len(cost_by_group.head(20)))),
-                    y=cost_by_group.head(20).values,
-                    name='Cost',
-                    marker_color='lightblue',
-                    text=[f"${v:,.0f}" for v in cost_by_group.head(20).values],
-                    textposition='outside'
-                ),
-                secondary_y=False
+        if 'TotalCost' in df.columns:
+            fig = px.histogram(
+                df[df['TotalCost'].notna()],
+                x='TotalCost',
+                nbins=50,
+                title="Cost Distribution",
+                labels={'TotalCost': 'Total Cost ($)'}
             )
-            
-            # Cumulative line
-            fig.add_trace(
-                go.Scatter(
-                    x=list(range(len(cumulative_percent.head(20)))),
-                    y=cumulative_percent.head(20).values,
-                    name='Cumulative %',
-                    line=dict(color='red', width=2),
-                    mode='lines+markers'
-                ),
-                secondary_y=True
-            )
-            
-            # Add 80% line
-            fig.add_hline(
-                y=80,
-                line_dash="dash",
-                line_color="green",
-                secondary_y=True,
-                annotation_text="80%"
-            )
-            
-            fig.update_xaxes(title_text=f"{group_by} Rank")
-            fig.update_yaxes(title_text="Cost ($)", secondary_y=False)
-            fig.update_yaxes(title_text="Cumulative %", secondary_y=True)
-            fig.update_layout(title=f"Pareto Analysis - Cost by {group_by}", height=500)
-            
             st.plotly_chart(fig, use_container_width=True)
     
     with tab2:
-        st.subheader("Cost vs Downtime Analysis")
-        
-        if 'TotalCost' in df.columns and 'DowntimeHours' in df.columns:
-            # Scatter plot
-            fig = px.scatter(
-                df,
-                x='DowntimeHours',
-                y='TotalCost',
-                color='Status' if 'Status' in df.columns else None,
-                size='TotalCost',
-                hover_data=['VehicleID'] if 'VehicleID' in df.columns else None,
-                title="Cost vs Downtime Correlation",
-                labels={'DowntimeHours': 'Downtime (hours)', 'TotalCost': 'Total Cost ($)'},
-                trendline="ols"
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Calculate correlation
-            correlation = df[['TotalCost', 'DowntimeHours']].corr().iloc[0, 1]
-            st.info(f"**Correlation Coefficient:** {correlation:.3f}")
-            
-            # Cost efficiency analysis
-            df['CostPerHour'] = df['TotalCost'] / df['DowntimeHours']
-            df['CostPerHour'] = df['CostPerHour'].replace([np.inf, -np.inf], np.nan)
-            
-            if 'VehicleID' in df.columns:
-                efficiency = df.groupby('VehicleID')['CostPerHour'].mean().sort_values().head(10)
-                
-                fig = px.bar(
-                    x=efficiency.values,
-                    y=efficiency.index,
-                    orientation='h',
-                    title="Most Cost-Efficient Vehicles ($/hour)",
-                    labels={'x': 'Cost per Hour ($)', 'y': 'Vehicle ID'},
-                    color=efficiency.values,
-                    color_continuous_scale='Greens'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-    
-    with tab3:
-        st.subheader("High Cost Failure Analysis")
+        st.subheader("High Cost Failures")
         
         if 'TotalCost' in df.columns:
-            # Identify high-cost failures
-            cost_threshold = df['TotalCost'].quantile(0.9)  # Top 10%
+            cost_threshold = df['TotalCost'].quantile(0.9)
             high_cost_failures = df[df['TotalCost'] > cost_threshold]
             
             st.info(f"Showing failures with cost > ${cost_threshold:,.2f} (top 10%)")
             
-            # High cost by failure mode
-            if 'FailureMode' in high_cost_failures.columns:
-                high_cost_modes = high_cost_failures.groupby('FailureMode').agg({
-                    'TotalCost': ['sum', 'mean', 'count']
-                }).round(2)
+            # Display top cost failures
+            if not high_cost_failures.empty:
+                display_cols = ['WorkOrderID', 'VehicleID', 'TotalCost', 'Status', 'OpenDate']
+                display_cols = [col for col in display_cols if col in high_cost_failures.columns]
                 
-                high_cost_modes.columns = ['Total Cost', 'Avg Cost', 'Count']
-                high_cost_modes = high_cost_modes.sort_values('Total Cost', ascending=False)
-                
-                fig = px.bar(
-                    high_cost_modes,
-                    x='Total Cost',
-                    y=high_cost_modes.index,
-                    orientation='h',
-                    title="High-Cost Failure Modes",
-                    color='Total Cost',
-                    color_continuous_scale='Reds'
-                )
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Table
-                st.dataframe(high_cost_modes, use_container_width=True)
+                if display_cols:
+                    st.dataframe(
+                        high_cost_failures[display_cols].sort_values('TotalCost', ascending=False).head(20),
+                        use_container_width=True
+                    )
 
 # ==================== MAIN APPLICATION ====================
 
@@ -1687,34 +1203,43 @@ def main():
     # Main tabs
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📂 Data",
-        "📝 Failures",
         "📊 Analysis",
-        "📋 CAPA",
         "📈 Reliability",
         "⚠️ Anomalies",
-        "💰 Costs"
+        "💰 Costs",
+        "📝 Failures",
+        "📋 CAPA"
     ])
     
     with tab1:
         render_data_tab()
     
     with tab2:
-        render_failures_tab()
-    
-    with tab3:
         render_analysis_tab()
     
-    with tab4:
-        render_capa_tab()
-    
-    with tab5:
+    with tab3:
         render_reliability_tab()
     
-    with tab6:
+    with tab4:
         render_anomalies_tab()
     
-    with tab7:
+    with tab5:
         render_costs_tab()
+    
+    with tab6:
+        render_failures_tab()
+    
+    with tab7:
+        render_capa_tab()
+    
+    # Footer
+    st.divider()
+    st.markdown("""
+    <div style='text-align: center; color: #666; padding: 1rem;'>
+        <p>FRACAS - Failure Reporting, Analysis, and Corrective Action System</p>
+        <p style='font-size: 0.8rem;'>Advanced maintenance analytics for military vehicles</p>
+    </div>
+    """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
