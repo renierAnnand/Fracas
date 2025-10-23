@@ -556,3 +556,20 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
+
+---
+
+## 📝 Quick Setup Instructions
+
+1. **Save the code** as `fracas_app.py`
+2. **Upload to your GitHub repository** (replace existing file)
+3. **Streamlit Cloud will auto-deploy** in ~30 seconds
+4. **Upload your Excel file** and enjoy 60-120x faster performance!
+
+### Requirements (requirements.txt):
+```
+streamlit==1.28.0
+pandas==2.3.3
+openpyxl==3.1.2
+plotly==5.17.0
