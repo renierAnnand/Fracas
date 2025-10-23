@@ -628,9 +628,18 @@ def render_data_tab():
     with col3:
         date_cols = [col for col in df.columns if 'date' in col.lower()]
         if date_cols:
-            date_col = date_cols[0]
-            date_range = f"{df[date_col].min().strftime('%Y-%m-%d')} to {df[date_col].max().strftime('%Y-%m-%d')}"
-            st.metric("Date Range", date_range)
+            try:
+                date_col = date_cols[0]
+                # Ensure datetime type
+                date_series = pd.to_datetime(df[date_col], errors='coerce')
+                if date_series.notna().any():
+                    min_date = date_series.min()
+                    max_date = date_series.max()
+                    if pd.notna(min_date) and pd.notna(max_date):
+                        date_range = f"{min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}"
+                        st.metric("Date Range", date_range)
+            except Exception as e:
+                pass  # Skip date range if it fails
     with col4:
         if st.session_state.df_cleaned is not None:
             st.metric("Mapped Fields", len(st.session_state.column_mapping))
