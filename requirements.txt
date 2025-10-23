@@ -1,9 +1,15 @@
+# FRACAS Application Requirements
+# Install with: pip install -r requirements.txt
+
+# Core dependencies (REQUIRED)
 streamlit>=1.28.0
 pandas>=2.0.0
-plotly>=5.17.0
-openpyxl>=3.1.0
 numpy>=1.24.0
+openpyxl>=3.1.0
+
+# Plotly for visualizations (REQUIRED)
+plotly>=5.17.0
+
+# Optional dependencies
+# Uncomment if you want advanced statistical features
 # scipy>=1.11.0
-# pytest>=7.4.0
-# black>=23.0.0
-# flake8>=6.0.0
