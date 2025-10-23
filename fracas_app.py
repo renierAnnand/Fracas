@@ -121,18 +121,37 @@ def load_excel_file(file_path: str = None, uploaded_file=None) -> pd.DataFrame:
     """Load Excel file with error handling"""
     try:
         if uploaded_file is not None:
-            df = pd.read_excel(uploaded_file)
+            # Reset file pointer to beginning
+            if hasattr(uploaded_file, 'seek'):
+                uploaded_file.seek(0)
+            df = pd.read_excel(uploaded_file, engine='openpyxl')
         elif file_path:
-            df = pd.read_excel(file_path)
+            df = pd.read_excel(file_path, engine='openpyxl')
         else:
-            # Try default path
+            # Try default paths
             try:
-                df = pd.read_excel('/mnt/user-data/uploads/Latest_WO.xlsx')
+                df = pd.read_excel('/mnt/user-data/uploads/Latest_WO.xlsx', engine='openpyxl')
             except:
-                df = pd.read_excel('/mnt/data/Latest WO.xlsx')
+                try:
+                    df = pd.read_excel('/mnt/data/Latest WO.xlsx', engine='openpyxl')
+                except:
+                    st.error("No file found at default locations. Please upload a file.")
+                    return None
+        
+        # Basic data type cleanup
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                try:
+                    # Try to convert to datetime if it looks like dates
+                    if df[col].astype(str).str.contains(r'\d{4}-\d{2}-\d{2}', na=False).any():
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
+                except:
+                    pass
+        
         return df
     except Exception as e:
         st.error(f"Error loading file: {str(e)}")
+        st.info("Please ensure the file is a valid Excel file (.xlsx or .xls)")
         return None
 
 def auto_map_columns(df: pd.DataFrame) -> Dict[str, str]:
@@ -465,16 +484,34 @@ def render_data_import():
             )
         
         with col2:
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False)
-            
-            st.download_button(
-                "📥 Download Cleaned Excel",
-                buffer.getvalue(),
-                "cleaned_work_orders.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            try:
+                # Prepare DataFrame for Excel export
+                df_excel = df.copy()
+                
+                # Convert datetime columns to string to avoid timezone issues
+                for col in df_excel.columns:
+                    if pd.api.types.is_datetime64_any_dtype(df_excel[col]):
+                        df_excel[col] = df_excel[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
+                    # Convert any object columns that might have issues
+                    elif df_excel[col].dtype == 'object':
+                        df_excel[col] = df_excel[col].astype(str).fillna('')
+                    # Handle any numeric columns with inf or very large values
+                    elif pd.api.types.is_numeric_dtype(df_excel[col]):
+                        df_excel[col] = df_excel[col].replace([np.inf, -np.inf], np.nan).fillna(0)
+                
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    df_excel.to_excel(writer, index=False, sheet_name='Cleaned_Data')
+                
+                st.download_button(
+                    "📥 Download Cleaned Excel",
+                    buffer.getvalue(),
+                    "cleaned_work_orders.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            except Exception as e:
+                st.error(f"Error exporting to Excel: {str(e)}")
+                st.info("Try downloading as CSV instead")
 
 def render_failure_reporting():
     """Render failure reporting interface"""
