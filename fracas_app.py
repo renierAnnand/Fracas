@@ -3,7 +3,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
-import openpyxl
 import io
 import hashlib
 
@@ -37,122 +36,44 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Helper function to create a hash for file caching
+# Helper function to create file hash
 def make_file_hash(file_bytes):
     """Create a hash of file bytes for cache key"""
     return hashlib.md5(file_bytes).hexdigest()
 
-# OPTIMIZED: Helper function to parse the Work Orders Excel file
+# Simplified parser for actual Excel format
 @st.cache_data(show_spinner="Processing Excel file...")
 def parse_work_orders(file_hash, file_bytes):
-    """Parse the Work Orders Excel file with schema in headers - OPTIMIZED VERSION
-    
-    Args:
-        file_hash: Hash of the file for cache key
-        file_bytes: Actual file bytes to process
-    """
+    """Parse the Work Orders Excel file - SIMPLIFIED VERSION for actual data format"""
     try:
-        # Load workbook
+        # Read Excel file directly with pandas
         file_like = io.BytesIO(file_bytes)
-        wb = openpyxl.load_workbook(file_like, data_only=True, read_only=False)
-        ws = wb.active
+        df = pd.read_excel(file_like)
         
-        st.info(f"📊 File contains {ws.max_row:,} rows and {ws.max_column:,} columns. Processing...")
+        st.info(f"📊 Processing {len(df):,} work orders with {len(df.columns)} columns...")
         
-        # OPTIMIZATION 1: Only process columns that have data
-        total_rows = ws.max_row - 1  # Exclude header
-        min_data_threshold = max(10, total_rows * 0.01)  # At least 10 rows or 1%
-        
-        # First pass: identify columns with actual data
-        progress_bar = st.progress(0, text="Analyzing columns...")
-        valid_columns = []
-        
-        for col_idx in range(1, min(ws.max_column + 1, 500)):  # Limit to first 500 columns
-            if col_idx % 50 == 0:
-                progress_bar.progress(col_idx / min(ws.max_column, 500), text=f"Analyzing columns... {col_idx}/{min(ws.max_column, 500)}")
-            
-            # Count non-empty cells in this column (sample first 100 rows)
-            non_empty_count = 0
-            for row_idx in range(2, min(ws.max_row + 1, 102)):
-                if ws.cell(row=row_idx, column=col_idx).value is not None:
-                    non_empty_count += 1
-            
-            # Keep column if it has data
-            if non_empty_count > 0:
-                valid_columns.append(col_idx)
-        
-        progress_bar.progress(100, text=f"Found {len(valid_columns)} columns with data")
-        st.success(f"✓ Processing {len(valid_columns)} relevant columns (filtered from {ws.max_column:,} total)")
-        
-        # OPTIMIZATION 2: Extract column names only for valid columns
-        column_names = []
-        column_indices = []
-        
-        for col_idx in valid_columns:
-            cell_value = ws.cell(row=1, column=col_idx).value
-            
-            if cell_value and isinstance(cell_value, str):
-                # Try to extract DisplayName
-                if 'DisplayName=' in cell_value:
-                    try:
-                        start_idx = cell_value.find('DisplayName="') + 13
-                        end_idx = cell_value.find('"', start_idx)
-                        if start_idx > 12 and end_idx > start_idx:
-                            display_name = cell_value[start_idx:end_idx]
-                            if display_name and len(display_name) < 200:
-                                # Clean up Arabic/English names
-                                if ' / ' in display_name:
-                                    display_name = display_name.split(' / ')[0].strip()
-                                column_names.append(display_name)
-                                column_indices.append(col_idx)
-                                continue
-                    except:
-                        pass
-            
-            # Fallback to generic column name
-            column_names.append(f'Column_{col_idx}')
-            column_indices.append(col_idx)
-        
-        # OPTIMIZATION 3: Extract data only from valid columns
-        data = []
-        progress_bar2 = st.progress(0, text="Loading data rows...")
-        
-        for row_idx in range(2, ws.max_row + 1):
-            if (row_idx - 2) % 500 == 0:
-                progress_bar2.progress((row_idx - 2) / (ws.max_row - 1), 
-                                      text=f"Loading data rows... {row_idx - 1}/{ws.max_row - 1}")
-            
-            row_data = []
-            for col_idx in column_indices:
-                cell_value = ws.cell(row=row_idx, column=col_idx).value
-                row_data.append(cell_value)
-            data.append(row_data)
-        
-        progress_bar2.progress(100, text="Data loaded successfully")
-        
-        # Create DataFrame
-        df = pd.DataFrame(data, columns=column_names)
-        
-        # Clean up column names
+        # Clean column names (remove extra spaces)
         df.columns = df.columns.str.strip()
         
-        # OPTIMIZATION 4: Convert date columns efficiently
+        # Convert date columns
         date_columns = []
         for col in df.columns:
-            col_lower = col.lower()
-            if 'date' in col_lower and df[col].dtype == 'object':
+            if 'date' in col.lower():
                 try:
                     df[col] = pd.to_datetime(df[col], errors='coerce')
                     date_columns.append(col)
                 except:
                     pass
         
-        wb.close()
+        # Show column mapping for debugging
+        with st.expander("📋 Detected Columns"):
+            cols_info = []
+            for col in df.columns:
+                non_null = df[col].notna().sum()
+                cols_info.append(f"• **{col}**: {non_null:,} non-empty values")
+            st.markdown("\n".join(cols_info))
         
-        # Remove completely empty columns
-        df = df.dropna(axis=1, how='all')
-        
-        st.success(f"✓ Loaded {len(df):,} rows × {len(df.columns)} columns successfully!")
+        st.success(f"✓ Loaded {len(df):,} work orders successfully!")
         
         return df
     
@@ -162,24 +83,22 @@ def parse_work_orders(file_hash, file_bytes):
         st.error(traceback.format_exc())
         return None
 
-# Analysis functions
+# Analysis functions adapted for actual column names
 def calculate_failure_metrics(df):
-    """Calculate key failure metrics"""
+    """Calculate key failure metrics based on actual columns"""
     metrics = {}
     
-    # Find status column
-    status_col = None
-    for col in df.columns:
-        if 'status' in str(col).lower() and 'item' not in str(col).lower():
-            status_col = col
-            break
+    # Use actual column name
+    status_col = 'Work order status'
     
-    if status_col:
+    if status_col in df.columns:
         metrics['total_work_orders'] = len(df)
         status_series = df[status_col].fillna('').astype(str)
+        
+        # Adapt to actual status values in the data
         metrics['completed'] = len(df[status_series.str.contains('Completed', case=False, na=False)])
-        metrics['in_progress'] = len(df[status_series.str.contains('Maintenance|Testing|Progress|Ongoing', case=False, na=False)])
-        metrics['waiting_parts'] = len(df[status_series.str.contains('Waiting', case=False, na=False)])
+        metrics['in_progress'] = len(df[status_series.str.contains('Under Maintenance|Process Initiated', case=False, na=False)])
+        metrics['waiting_parts'] = len(df[status_series.str.contains('Waiting Spare Parts', case=False, na=False)])
         metrics['completion_rate'] = (metrics['completed'] / metrics['total_work_orders'] * 100) if metrics['total_work_orders'] > 0 else 0
     else:
         metrics['total_work_orders'] = len(df)
@@ -190,72 +109,84 @@ def calculate_failure_metrics(df):
     
     return metrics
 
-def identify_top_failures(df, limit=10):
-    """Identify most common failure types"""
-    vehicle_col = None
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if 'vehicle type' in col_lower or 'veh type' in col_lower or 'equipment type' in col_lower:
-            if not any(arabic_char in str(col) for arabic_char in 'ابتثجحخدذرزسشصضطظعغفقكلمنهوي'):
-                vehicle_col = col
-                break
+def identify_top_vehicles(df, limit=10):
+    """Identify most common vehicle types using actual column name"""
+    vehicle_col = 'Vehicle Make and Model'
     
-    if not vehicle_col:
-        for col in df.columns:
-            col_lower = str(col).lower()
-            if ('vehicle' in col_lower or 'veh' in col_lower) and 'type' in col_lower and 'description' not in col_lower:
-                vehicle_col = col
-                break
-    
-    if vehicle_col:
-        clean_series = df[vehicle_col].fillna('Unknown').astype(str).str.strip()
-        clean_series = clean_series[clean_series.str.len() > 2]
-        return clean_series.value_counts().head(limit)
+    if vehicle_col in df.columns:
+        # Clean the data
+        vehicle_series = df[vehicle_col].fillna('Unknown').astype(str).str.strip()
+        # Remove empty or very short values
+        vehicle_series = vehicle_series[vehicle_series.str.len() > 2]
+        # Remove "Unknown"
+        vehicle_series = vehicle_series[vehicle_series != 'Unknown']
+        
+        if len(vehicle_series) > 0:
+            return vehicle_series.value_counts().head(limit)
     return None
 
 def analyze_by_workshop(df):
-    """Analyze work orders by workshop"""
-    workshop_col = None
-    for col in df.columns:
-        if 'workshop' in str(col).lower() and 'description' not in str(col).lower():
-            if not any(arabic_char in str(col) for arabic_char in 'ابتثجحخدذرزسشصضطظعغفقكلمنهوي'):
-                workshop_col = col
-                break
+    """Analyze work orders by workshop using actual column name"""
+    workshop_col = 'Workshop name'
     
-    if not workshop_col:
-        for col in df.columns:
-            if 'workshop' in str(col).lower():
-                workshop_col = col
-                break
+    if workshop_col in df.columns:
+        # Clean the data
+        workshop_series = df[workshop_col].fillna('Unknown').astype(str).str.strip()
+        # Remove empty values
+        workshop_series = workshop_series[(workshop_series.str.len() > 2) & (workshop_series != 'Unknown')]
+        
+        if len(workshop_series) > 0:
+            return workshop_series.value_counts()
+    return None
+
+def analyze_by_sector(df):
+    """Analyze work orders by sector"""
+    sector_col = 'Sector'
     
-    if workshop_col:
-        clean_series = df[workshop_col].fillna('Unknown').astype(str).str.strip()
-        clean_series = clean_series[clean_series.str.len() > 2]
-        return clean_series.value_counts()
+    if sector_col in df.columns:
+        sector_series = df[sector_col].fillna('Unknown').astype(str).str.strip()
+        sector_series = sector_series[(sector_series.str.len() > 2) & (sector_series != 'Unknown')]
+        
+        if len(sector_series) > 0:
+            return sector_series.value_counts()
     return None
 
 def create_trend_analysis(df):
-    """Create trend analysis based on date columns"""
-    date_col = None
-    for col in df.columns:
-        col_lower = str(col).lower()
-        if 'date' in col_lower and pd.api.types.is_datetime64_any_dtype(df[col]):
-            if 'work order' in col_lower or 'created' in col_lower or 'create' in col_lower:
-                date_col = col
-                break
+    """Create trend analysis based on Date column"""
+    date_col = 'Date'
     
-    if not date_col:
-        for col in df.columns:
-            if pd.api.types.is_datetime64_any_dtype(df[col]):
-                date_col = col
-                break
-    
-    if date_col:
+    if date_col in df.columns and pd.api.types.is_datetime64_any_dtype(df[date_col]):
+        # Filter out invalid dates
         df_filtered = df[df[date_col].notna()].copy()
+        
+        # Group by month
         df_filtered['month'] = df_filtered[date_col].dt.to_period('M')
         trend_data = df_filtered.groupby('month').size()
-        return trend_data
-    return None
+        
+        # Also calculate status trends
+        if 'Work order status' in df.columns:
+            status_trends = df_filtered.groupby(['month', 'Work order status']).size().unstack(fill_value=0)
+            return trend_data, status_trends
+        
+        return trend_data, None
+    return None, None
+
+def analyze_spare_parts(df):
+    """Analyze spare parts requirements"""
+    spare_col = 'Spare parts Required'
+    received_col = 'Received Spare Parts (Yes/No)'
+    
+    results = {}
+    
+    if spare_col in df.columns:
+        results['required'] = df[spare_col].value_counts()
+    
+    if received_col in df.columns:
+        # This column seems to have dates, so let's count non-null as received
+        results['received_count'] = df[received_col].notna().sum()
+        results['total_required'] = len(df[df[spare_col].str.contains('Yes', case=False, na=False)]) if spare_col in df.columns else 0
+    
+    return results
 
 # Main application
 def main():
@@ -273,29 +204,29 @@ def main():
         st.markdown("---")
         st.markdown("### 📊 System Information")
         st.info("""
-        **Version:** 2.0 (Optimized)
-        **Processing:** Smart column detection
-        **Performance:** 60-120x faster
+        **Version:** 3.0 (Optimized for your data)
+        **Status:** Production Ready
+        **Performance:** Real-time analysis
         """)
         
         # Clear cache button
-        if st.button("🔄 Clear Cache", help="Clear cached data and reprocess file"):
+        if st.button("🔄 Clear Cache & Reprocess"):
             st.cache_data.clear()
-            st.success("Cache cleared! Upload your file again.")
+            st.rerun()
     
     # Main content
     if uploaded_file is not None:
         try:
-            # Read file bytes and create hash for caching
+            # Read file and create hash
             file_bytes = uploaded_file.read()
             file_hash = make_file_hash(file_bytes)
             
-            # Parse the Excel file with hash-based caching
+            # Parse the Excel file
             df = parse_work_orders(file_hash, file_bytes)
             
             if df is not None and not df.empty:
-                # Create tabs for different analyses
-                tabs = st.tabs(["📊 Overview", "🚗 Equipment Analysis", "🏭 Workshop Analysis", "📈 Trends", "📋 Raw Data"])
+                # Create tabs
+                tabs = st.tabs(["📊 Overview", "🚗 Vehicle Analysis", "🏭 Workshop Analysis", "📈 Trends", "🔧 Spare Parts", "📋 Raw Data"])
                 
                 # Tab 1: Overview
                 with tabs[0]:
@@ -308,72 +239,102 @@ def main():
                     with col1:
                         st.metric("Total Work Orders", f"{metrics['total_work_orders']:,}")
                     with col2:
-                        st.metric("Completed", f"{metrics['completed']:,}")
+                        st.metric("Completed", f"{metrics['completed']:,}", 
+                                delta=f"{metrics['completion_rate']:.1f}%")
                     with col3:
-                        st.metric("In Progress", f"{metrics['in_progress']:,}")
+                        st.metric("Under Maintenance", f"{metrics['in_progress']:,}")
                     with col4:
-                        st.metric("Waiting Parts", f"{metrics['waiting_parts']:,}")
+                        st.metric("Waiting Spare Parts", f"{metrics['waiting_parts']:,}",
+                                delta=f"{(metrics['waiting_parts']/metrics['total_work_orders']*100):.1f}%" if metrics['total_work_orders'] > 0 else "0%")
                     with col5:
-                        st.metric("Completion Rate", f"{metrics['completion_rate']:.1f}%")
+                        completion_rate_color = "🟢" if metrics['completion_rate'] > 50 else "🟡" if metrics['completion_rate'] > 25 else "🔴"
+                        st.metric("Completion Rate", f"{completion_rate_color} {metrics['completion_rate']:.1f}%")
                     
-                    # Top failures
-                    st.subheader("🔝 Top Equipment/Vehicle Types by Work Orders")
-                    top_failures = identify_top_failures(df)
-                    if top_failures is not None and not top_failures.empty:
+                    # Status distribution
+                    st.subheader("📊 Work Order Status Distribution")
+                    if 'Work order status' in df.columns:
+                        status_counts = df['Work order status'].value_counts()
+                        
                         col1, col2 = st.columns([2, 1])
                         with col1:
-                            fig = px.bar(x=top_failures.values, y=top_failures.index, 
-                                       orientation='h',
-                                       title="Most Common Equipment Types in Work Orders",
-                                       color=top_failures.values,
-                                       color_continuous_scale='Reds')
-                            fig.update_layout(height=400, showlegend=False)
+                            fig = px.pie(values=status_counts.values, 
+                                       names=status_counts.index,
+                                       title="Current Status of All Work Orders",
+                                       color_discrete_sequence=px.colors.sequential.Blues_r)
+                            fig.update_traces(textposition='inside', textinfo='percent+label')
                             st.plotly_chart(fig, use_container_width=True)
                         
                         with col2:
-                            st.dataframe(top_failures.reset_index().rename(
-                                columns={'index': 'Equipment Type', 0: 'Count'}),
-                                hide_index=True, use_container_width=True)
+                            st.markdown("### Status Breakdown")
+                            for status, count in status_counts.items():
+                                percentage = (count / len(df) * 100)
+                                st.metric(status, f"{count:,}", f"{percentage:.1f}%")
                     
-                    # Data quality assessment
-                    st.subheader("📋 Data Quality Assessment")
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Total Rows", f"{len(df):,}")
-                    with col2:
-                        st.metric("Total Columns", f"{len(df.columns):,}")
-                    with col3:
-                        completeness = (df.notna().sum().sum() / (len(df) * len(df.columns)) * 100)
-                        st.metric("Data Completeness", f"{completeness:.1f}%")
+                    # Sector analysis
+                    st.subheader("🌍 Sector Distribution")
+                    sector_data = analyze_by_sector(df)
+                    if sector_data is not None:
+                        fig = px.bar(x=sector_data.values, y=sector_data.index,
+                                   orientation='h',
+                                   title="Work Orders by Sector",
+                                   color=sector_data.values,
+                                   color_continuous_scale='Viridis')
+                        fig.update_layout(height=300, showlegend=False)
+                        st.plotly_chart(fig, use_container_width=True)
                 
-                # Tab 2: Equipment Analysis
+                # Tab 2: Vehicle Analysis
                 with tabs[1]:
-                    st.header("Equipment/Vehicle Analysis")
+                    st.header("Vehicle/Equipment Analysis")
                     
-                    # Find VIN column
-                    vin_col = None
-                    for col in df.columns:
-                        if 'vin' in str(col).lower() or 'vehicle identification' in str(col).lower():
-                            vin_col = col
-                            break
+                    # Vehicle statistics
+                    if 'Vehicle VIN' in df.columns:
+                        unique_vehicles = df['Vehicle VIN'].nunique()
+                        st.metric("Unique Vehicles (by VIN)", f"{unique_vehicles:,}")
                     
-                    if vin_col:
-                        unique_vehicles = df[vin_col].nunique()
-                        st.metric("Unique Vehicles/Equipment", f"{unique_vehicles:,}")
+                    # Top vehicles
+                    st.subheader("🔝 Top Vehicles by Work Orders")
+                    top_vehicles = identify_top_vehicles(df, 15)
                     
-                    # Malfunction type analysis
-                    malfunction_col = None
-                    for col in df.columns:
-                        col_lower = str(col).lower()
-                        if 'malfunction' in col_lower or 'failure' in col_lower:
-                            malfunction_col = col
-                            break
+                    if top_vehicles is not None and not top_vehicles.empty:
+                        col1, col2 = st.columns([2, 1])
+                        
+                        with col1:
+                            fig = px.bar(x=top_vehicles.values, 
+                                       y=top_vehicles.index,
+                                       orientation='h',
+                                       title="Most Serviced Vehicle Types",
+                                       color=top_vehicles.values,
+                                       color_continuous_scale='Reds',
+                                       labels={'x': 'Number of Work Orders', 'y': 'Vehicle Type'})
+                            fig.update_layout(height=500, showlegend=False)
+                            st.plotly_chart(fig, use_container_width=True)
+                        
+                        with col2:
+                            st.markdown("### Vehicle Rankings")
+                            for i, (vehicle, count) in enumerate(top_vehicles.items(), 1):
+                                percentage = (count / len(df) * 100)
+                                st.markdown(f"**{i}. {vehicle[:30]}...**")
+                                st.markdown(f"   {count:,} orders ({percentage:.1f}%)")
+                                st.markdown("---")
                     
-                    if malfunction_col and malfunction_col in df.columns:
-                        malfunction_counts = df[malfunction_col].value_counts()
-                        if not malfunction_counts.empty:
-                            fig = px.pie(values=malfunction_counts.values, names=malfunction_counts.index,
-                                       title="Maintenance Type Distribution")
+                    # Vehicle by status
+                    st.subheader("📊 Vehicle Status Analysis")
+                    if 'Vehicle Make and Model' in df.columns and 'Work order status' in df.columns:
+                        # Get top 5 vehicles for cleaner visualization
+                        top_5_vehicles = top_vehicles.head(5).index if top_vehicles is not None else []
+                        if len(top_5_vehicles) > 0:
+                            df_top_vehicles = df[df['Vehicle Make and Model'].isin(top_5_vehicles)]
+                            
+                            status_by_vehicle = pd.crosstab(
+                                df_top_vehicles['Vehicle Make and Model'],
+                                df_top_vehicles['Work order status']
+                            )
+                            
+                            fig = px.bar(status_by_vehicle.T,
+                                       title="Status Distribution for Top 5 Vehicle Types",
+                                       labels={'value': 'Count', 'index': 'Status'},
+                                       color_discrete_sequence=px.colors.qualitative.Set3)
+                            fig.update_layout(height=400, barmode='group')
                             st.plotly_chart(fig, use_container_width=True)
                 
                 # Tab 3: Workshop Analysis
@@ -381,183 +342,352 @@ def main():
                     st.header("Workshop Performance Analysis")
                     
                     workshop_analysis = analyze_by_workshop(df)
+                    
                     if workshop_analysis is not None and not workshop_analysis.empty:
-                        col1, col2 = st.columns([2, 1])
-                        
+                        # Overall metrics
+                        col1, col2, col3, col4 = st.columns(4)
                         with col1:
-                            st.subheader("Work Orders by Workshop")
-                            top_workshops = workshop_analysis.head(15)
-                            fig = px.bar(x=top_workshops.values, y=top_workshops.index,
-                                       orientation='h',
-                                       title="Workshop Workload Distribution",
-                                       color=top_workshops.values,
-                                       color_continuous_scale='Blues')
-                            fig.update_layout(height=600, showlegend=False)
-                            st.plotly_chart(fig, use_container_width=True)
-                        
+                            st.metric("Total Workshops", f"{len(workshop_analysis):,}")
                         with col2:
-                            st.subheader("Workshop Statistics")
-                            st.metric("Total Workshops", len(workshop_analysis))
-                            if len(workshop_analysis) > 0:
-                                st.metric("Busiest Workshop", workshop_analysis.index[0])
-                                st.metric("Max Work Orders", workshop_analysis.values[0])
-                                avg_workload = workshop_analysis.mean()
-                                st.metric("Avg Work Orders/Workshop", f"{avg_workload:.1f}")
+                            st.metric("Busiest Workshop", workshop_analysis.index[0][:30])
+                        with col3:
+                            st.metric("Max Work Orders", f"{workshop_analysis.values[0]:,}")
+                        with col4:
+                            avg_workload = workshop_analysis.mean()
+                            st.metric("Avg Work Orders", f"{avg_workload:.0f}")
+                        
+                        st.subheader("📊 Workshop Workload Distribution")
+                        
+                        # Show top 10 workshops
+                        top_workshops = workshop_analysis.head(10)
+                        
+                        fig = px.bar(x=top_workshops.values,
+                                   y=top_workshops.index,
+                                   orientation='h',
+                                   title="Top 10 Workshops by Work Order Volume",
+                                   color=top_workshops.values,
+                                   color_continuous_scale='Blues',
+                                   labels={'x': 'Number of Work Orders', 'y': 'Workshop'})
+                        
+                        # Truncate long workshop names for better display
+                        fig.update_yaxes(tickmode='array',
+                                       tickvals=list(range(len(top_workshops))),
+                                       ticktext=[name[:40] + '...' if len(name) > 40 else name 
+                                               for name in top_workshops.index])
+                        
+                        fig.update_layout(height=500, showlegend=False)
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Workshop efficiency
+                        st.subheader("🎯 Workshop Completion Rates")
+                        if 'Work order status' in df.columns:
+                            # Calculate completion rate per workshop
+                            workshop_completion = []
+                            
+                            for workshop in top_workshops.index[:5]:  # Top 5 for clarity
+                                workshop_df = df[df['Workshop name'] == workshop]
+                                completed = len(workshop_df[workshop_df['Work order status'] == 'Completed'])
+                                total = len(workshop_df)
+                                completion_rate = (completed / total * 100) if total > 0 else 0
+                                
+                                workshop_completion.append({
+                                    'Workshop': workshop[:30] + '...' if len(workshop) > 30 else workshop,
+                                    'Completion Rate': completion_rate,
+                                    'Completed': completed,
+                                    'Total': total
+                                })
+                            
+                            if workshop_completion:
+                                wc_df = pd.DataFrame(workshop_completion)
+                                
+                                fig = px.bar(wc_df, x='Workshop', y='Completion Rate',
+                                           title="Completion Rates for Top 5 Workshops",
+                                           color='Completion Rate',
+                                           color_continuous_scale='RdYlGn',
+                                           range_color=[0, 100],
+                                           text='Completion Rate')
+                                
+                                fig.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
+                                fig.update_layout(height=400)
+                                st.plotly_chart(fig, use_container_width=True)
                 
                 # Tab 4: Trends
                 with tabs[3]:
                     st.header("Trend Analysis")
                     
-                    trend_data = create_trend_analysis(df)
+                    trend_data, status_trends = create_trend_analysis(df)
+                    
                     if trend_data is not None and not trend_data.empty:
-                        st.subheader("Work Orders Over Time")
+                        # Overall trend
+                        st.subheader("📈 Work Orders Over Time")
+                        
                         fig = go.Figure()
                         fig.add_trace(go.Scatter(
-                            x=trend_data.index.astype(str), 
+                            x=trend_data.index.astype(str),
                             y=trend_data.values,
-                            mode='lines+markers', 
-                            name='Work Orders',
+                            mode='lines+markers',
+                            name='Total Work Orders',
                             line=dict(color='#1f77b4', width=3),
-                            marker=dict(size=8)
+                            marker=dict(size=8),
+                            hovertemplate='<b>%{x}</b><br>Work Orders: %{y}<extra></extra>'
                         ))
+                        
+                        # Add average line
+                        avg_value = trend_data.mean()
+                        fig.add_hline(y=avg_value, line_dash="dash", 
+                                    line_color="gray", opacity=0.7,
+                                    annotation_text=f"Average: {avg_value:.0f}")
+                        
                         fig.update_layout(
-                            title="Monthly Work Order Trends",
-                            xaxis_title="Month", 
+                            title="Monthly Work Order Volume",
+                            xaxis_title="Month",
                             yaxis_title="Number of Work Orders",
-                            hovermode='x unified', 
+                            hovermode='x unified',
                             height=400
                         )
                         st.plotly_chart(fig, use_container_width=True)
                         
-                        # Additional metrics
-                        col1, col2, col3 = st.columns(3)
+                        # Trend metrics
+                        col1, col2, col3, col4 = st.columns(4)
                         with col1:
                             st.metric("Peak Month", str(trend_data.idxmax()))
                         with col2:
-                            st.metric("Peak Work Orders", trend_data.max())
+                            st.metric("Peak Volume", f"{trend_data.max():,}")
                         with col3:
-                            avg_per_month = trend_data.mean()
-                            st.metric("Avg per Month", f"{avg_per_month:.1f}")
-                    
-                    # Spare parts analysis
-                    st.subheader("Spare Parts Requirements")
-                    spare_parts_col = None
-                    for col in df.columns:
-                        if 'spare' in col.lower() and 'parts' in col.lower():
-                            spare_parts_col = col
-                            break
-                    
-                    if spare_parts_col and spare_parts_col in df.columns:
-                        spare_counts = df[spare_parts_col].value_counts()
-                        if not spare_counts.empty:
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                fig = px.pie(values=spare_counts.values, names=spare_counts.index,
-                                           title="Spare Parts Required vs Not Required")
-                                st.plotly_chart(fig, use_container_width=True)
-                            with col2:
-                                total = len(df)
-                                if 'Yes' in spare_counts.index or 'Yes / نعم' in spare_counts.index:
-                                    yes_count = spare_counts.get('Yes', 0) + spare_counts.get('Yes / نعم', 0)
-                                    spare_rate = (yes_count / total * 100) if total > 0 else 0
-                                    st.metric("Spare Parts Required Rate", f"{spare_rate:.1f}%")
+                            st.metric("Average/Month", f"{trend_data.mean():.0f}")
+                        with col4:
+                            # Calculate trend (increasing/decreasing)
+                            if len(trend_data) > 1:
+                                recent_avg = trend_data.iloc[-3:].mean()
+                                older_avg = trend_data.iloc[:-3].mean()
+                                trend_direction = "📈" if recent_avg > older_avg else "📉"
+                                st.metric("Recent Trend", trend_direction, 
+                                        f"{((recent_avg/older_avg - 1) * 100):.1f}%")
+                        
+                        # Status trends over time
+                        if status_trends is not None and not status_trends.empty:
+                            st.subheader("📊 Status Trends Over Time")
+                            
+                            fig = go.Figure()
+                            colors = ['green', 'red', 'orange', 'blue']
+                            
+                            for i, status in enumerate(status_trends.columns):
+                                fig.add_trace(go.Scatter(
+                                    x=status_trends.index.astype(str),
+                                    y=status_trends[status],
+                                    mode='lines+markers',
+                                    name=status,
+                                    line=dict(width=2),
+                                    stackgroup='one'
+                                ))
+                            
+                            fig.update_layout(
+                                title="Work Order Status Distribution Over Time",
+                                xaxis_title="Month",
+                                yaxis_title="Number of Work Orders",
+                                hovermode='x unified',
+                                height=400
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
                 
-                # Tab 5: Raw Data
+                # Tab 5: Spare Parts Analysis
                 with tabs[4]:
+                    st.header("Spare Parts Analysis")
+                    
+                    spare_results = analyze_spare_parts(df)
+                    
+                    if spare_results:
+                        # Spare parts required
+                        if 'required' in spare_results:
+                            st.subheader("🔧 Spare Parts Requirements")
+                            
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                fig = px.pie(
+                                    values=spare_results['required'].values,
+                                    names=spare_results['required'].index,
+                                    title="Spare Parts Required Distribution",
+                                    color_discrete_map={'Yes / نعم': '#ff4444', 'No / لا': '#44ff44'}
+                                )
+                                fig.update_traces(textposition='inside', textinfo='percent+label')
+                                st.plotly_chart(fig, use_container_width=True)
+                            
+                            with col2:
+                                st.markdown("### Spare Parts Metrics")
+                                
+                                total = len(df)
+                                yes_count = spare_results['required'].get('Yes / نعم', 0)
+                                no_count = spare_results['required'].get('No / لا', 0)
+                                
+                                st.metric("Require Spare Parts", f"{yes_count:,}", 
+                                        f"{(yes_count/total*100):.1f}%")
+                                st.metric("No Spare Parts Needed", f"{no_count:,}",
+                                        f"{(no_count/total*100):.1f}%")
+                                
+                                if 'received_count' in spare_results:
+                                    st.metric("Spare Parts Received", 
+                                            f"{spare_results['received_count']:,}",
+                                            f"{(spare_results['received_count']/yes_count*100):.1f}% of required" if yes_count > 0 else "N/A")
+                        
+                        # Spare parts by workshop
+                        st.subheader("📊 Spare Parts Requirements by Workshop")
+                        if 'Workshop name' in df.columns and 'Spare parts Required' in df.columns:
+                            # Get top 5 workshops
+                            top_workshops = df['Workshop name'].value_counts().head(5).index
+                            df_top = df[df['Workshop name'].isin(top_workshops)]
+                            
+                            spare_by_workshop = pd.crosstab(
+                                df_top['Workshop name'],
+                                df_top['Spare parts Required']
+                            )
+                            
+                            # Truncate workshop names
+                            spare_by_workshop.index = [name[:30] + '...' if len(name) > 30 else name 
+                                                      for name in spare_by_workshop.index]
+                            
+                            fig = px.bar(spare_by_workshop,
+                                       title="Spare Parts Requirements - Top 5 Workshops",
+                                       labels={'value': 'Count', 'index': 'Workshop'},
+                                       color_discrete_map={'Yes / نعم': '#ff4444', 'No / لا': '#44ff44'})
+                            fig.update_layout(height=400, barmode='group')
+                            st.plotly_chart(fig, use_container_width=True)
+                
+                # Tab 6: Raw Data
+                with tabs[5]:
                     st.header("Raw Data Viewer")
                     
                     # Filter options
-                    col1, col2 = st.columns(2)
+                    col1, col2, col3 = st.columns(3)
+                    
                     with col1:
-                        search_term = st.text_input("🔍 Search across all columns", "")
+                        search_term = st.text_input("🔍 Search all columns", "")
+                    
                     with col2:
-                        all_columns = list(df.columns)
-                        selected_columns = st.multiselect(
-                            "Select columns to display", 
-                            all_columns,
-                            default=all_columns[:min(10, len(all_columns))]
+                        # Filter by status
+                        status_filter = st.selectbox(
+                            "Filter by Status",
+                            ["All"] + list(df['Work order status'].unique()) if 'Work order status' in df.columns else ["All"]
                         )
                     
-                    # Apply search filter
-                    if search_term:
-                        mask = df.astype(str).apply(lambda x: x.str.contains(search_term, case=False, na=False)).any(axis=1)
-                        filtered_df = df[mask]
-                    else:
-                        filtered_df = df
+                    with col3:
+                        # Filter by workshop
+                        workshop_filter = st.selectbox(
+                            "Filter by Workshop",
+                            ["All"] + list(df['Workshop name'].unique()[:20]) if 'Workshop name' in df.columns else ["All"]
+                        )
                     
-                    # Display selected columns
-                    if selected_columns:
-                        st.dataframe(filtered_df[selected_columns], use_container_width=True, height=600)
-                    else:
-                        st.dataframe(filtered_df, use_container_width=True, height=600)
+                    # Column selector
+                    all_columns = list(df.columns)
+                    default_cols = ['ID', 'Date', 'Work order status', 'Vehicle Make and Model', 
+                                  'Workshop name', 'Spare parts Required']
+                    default_cols = [col for col in default_cols if col in all_columns]
                     
-                    # Download option
-                    csv = filtered_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="📥 Download Filtered Data as CSV",
-                        data=csv,
-                        file_name="fracas_data.csv",
-                        mime="text/csv"
+                    selected_columns = st.multiselect(
+                        "Select columns to display",
+                        all_columns,
+                        default=default_cols[:min(8, len(default_cols))]
                     )
                     
-                    st.info(f"Showing {len(filtered_df):,} of {len(df):,} total work orders")
+                    # Apply filters
+                    filtered_df = df.copy()
+                    
+                    if search_term:
+                        mask = filtered_df.astype(str).apply(
+                            lambda x: x.str.contains(search_term, case=False, na=False)
+                        ).any(axis=1)
+                        filtered_df = filtered_df[mask]
+                    
+                    if status_filter != "All" and 'Work order status' in df.columns:
+                        filtered_df = filtered_df[filtered_df['Work order status'] == status_filter]
+                    
+                    if workshop_filter != "All" and 'Workshop name' in df.columns:
+                        filtered_df = filtered_df[filtered_df['Workshop name'] == workshop_filter]
+                    
+                    # Display data
+                    if selected_columns:
+                        st.dataframe(
+                            filtered_df[selected_columns],
+                            use_container_width=True,
+                            height=600
+                        )
+                    else:
+                        st.warning("Please select at least one column to display")
+                    
+                    # Statistics and download
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.info(f"Showing {len(filtered_df):,} of {len(df):,} total work orders")
+                    
+                    with col2:
+                        # Download button
+                        csv = filtered_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="📥 Download Filtered Data (CSV)",
+                            data=csv,
+                            file_name=f"fracas_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            mime="text/csv"
+                        )
+            
             else:
-                st.error("Failed to load data from the file. Please check the file format.")
+                st.error("❌ Failed to load data. Please check your Excel file format.")
                 
         except Exception as e:
-            st.error(f"An error occurred while processing the file: {str(e)}")
-            st.info("Please try uploading the file again or check if it's a valid Excel file.")
+            st.error(f"❌ An error occurred: {str(e)}")
+            st.info("💡 Try clicking 'Clear Cache & Reprocess' in the sidebar")
+            
+            with st.expander("🔍 Show Error Details"):
+                import traceback
+                st.code(traceback.format_exc())
     
     else:
         # Welcome screen
         st.info("👆 Please upload a Work Orders Excel file to begin analysis")
         
+        # Show sample data structure
         st.markdown("### 📖 About FRACAS")
         st.markdown("""
-        This **FRACAS (Failure Reporting, Analysis, and Corrective Action System)** helps you:
+        This **FRACAS (Failure Reporting, Analysis, and Corrective Action System)** provides comprehensive analysis of your maintenance data:
         
-        - 📊 **Analyze failure patterns** across your military equipment maintenance operations
-        - 🔍 **Identify recurring faults** and high-failure equipment
-        - 🏭 **Monitor workshop performance** and workload distribution
-        - 📈 **Track trends** over time to improve preventive maintenance
-        - 🎯 **Make data-driven decisions** for resource allocation
+        #### 📊 Key Features:
+        - **Real-time Status Tracking** - Monitor work order completion rates
+        - **Vehicle Analysis** - Identify high-maintenance vehicles and equipment
+        - **Workshop Performance** - Evaluate workshop efficiency and workload
+        - **Trend Analysis** - Track patterns over time
+        - **Spare Parts Management** - Analyze parts requirements and availability
+        - **Data Export** - Download filtered data for reporting
         
         ---
         
-        ### 🚀 Getting Started
-        1. Upload your Work Orders Excel file using the sidebar
-        2. Explore the different analysis tabs
-        3. Download reports and insights for your team
+        ### 📋 Expected Data Columns:
+        Your Excel file should include these columns:
+        - **Work order status** - Current status (Completed, Waiting Spare Parts, etc.)
+        - **Vehicle Make and Model** - Equipment/vehicle type information
+        - **Workshop name** - Assigned workshop
+        - **Date** - Work order creation date
+        - **Spare parts Required** - Yes/No indicator
+        - **Sector** - Operational sector
+        - **Vehicle VIN** - Vehicle identification
         
-        ### ⚡ Performance Optimizations
-        - **Smart Column Detection**: Only processes columns with actual data
-        - **Cached Processing**: File is processed once and cached for faster navigation
-        - **Progress Indicators**: Shows real-time processing status
-        - **Efficient Loading**: Handles large files with thousands of columns
+        ### 🚀 Getting Started:
+        1. Upload your Excel file using the sidebar
+        2. Wait for processing (usually under 30 seconds)
+        3. Explore the analysis tabs
+        4. Export filtered data as needed
         """)
         
-        with st.expander("ℹ️ System Requirements"):
-            st.markdown("""
-            **Supported File Formats:**
-            - Excel files (.xlsx, .xls)
-            - Work Orders with standard schema
-            
-            **Expected Data Fields:**
-            - Work Order Number
-            - Vehicle/Equipment Type
-            - Workshop
-            - Status
-            - Date
-            - VIN Number
-            - Malfunction Type
-            - Spare Parts Required
-            - Sector
-            
-            **Troubleshooting:**
-            - If you encounter cache errors, click the "Clear Cache" button in the sidebar
-            - Make sure your Excel file is not corrupted
-            - Try re-uploading the file if processing fails
-            """)
+        # Show sample metrics
+        with st.expander("📈 Sample Metrics You'll See"):
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Work Orders", "3,225", "Sample")
+            with col2:
+                st.metric("Completion Rate", "41.5%", "Sample")
+            with col3:
+                st.metric("Waiting Parts", "55.7%", "Sample")
+            with col4:
+                st.metric("Active Workshops", "31", "Sample")
 
 if __name__ == "__main__":
     main()
