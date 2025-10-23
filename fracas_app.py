@@ -21,20 +21,18 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import io
 from datetime import datetime, timedelta
 import hashlib
 import warnings
 warnings.filterwarnings('ignore')
 
-# Try to import scipy, but make it optional
+# Try to import optional dependencies
 try:
     from scipy import stats
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False
-    st.warning("⚠️ scipy not available. Some statistical features will be limited.")
 
 # Page configuration
 st.set_page_config(
