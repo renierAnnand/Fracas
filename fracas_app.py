@@ -216,10 +216,20 @@ def clean_and_enrich_data(df, mapping):
         for pattern, standard in status_map.items():
             df_clean.loc[df_clean['Status'].str.contains(pattern, na=False), 'Status'] = standard
     
-    # Calculate RepairDuration
+    # Calculate RepairDuration with error handling
     if 'OpenDate' in df_clean.columns and 'CloseDate' in df_clean.columns:
-        df_clean['RepairDuration'] = (df_clean['CloseDate'] - df_clean['OpenDate']).dt.total_seconds() / 3600
-        df_clean['RepairDuration'] = df_clean['RepairDuration'].clip(lower=0)
+        try:
+            # Ensure both are datetime
+            df_clean['OpenDate'] = pd.to_datetime(df_clean['OpenDate'], errors='coerce')
+            df_clean['CloseDate'] = pd.to_datetime(df_clean['CloseDate'], errors='coerce')
+            
+            # Calculate duration
+            time_diff = df_clean['CloseDate'] - df_clean['OpenDate']
+            df_clean['RepairDuration'] = time_diff.dt.total_seconds() / 3600
+            df_clean['RepairDuration'] = df_clean['RepairDuration'].clip(lower=0)
+        except Exception as e:
+            # If calculation fails, create empty column
+            df_clean['RepairDuration'] = np.nan
     
     # Calculate TotalCost
     if 'LaborCost' in df_clean.columns and 'PartCost' in df_clean.columns:
@@ -229,10 +239,14 @@ def clean_and_enrich_data(df, mapping):
     elif 'PartCost' in df_clean.columns:
         df_clean['TotalCost'] = df_clean['PartCost'].fillna(0)
     
-    # Calculate DaysSinceLastFailure for each vehicle
+    # Calculate DaysSinceLastFailure for each vehicle with error handling
     if 'VehicleID' in df_clean.columns and 'OpenDate' in df_clean.columns:
-        df_clean = df_clean.sort_values(['VehicleID', 'OpenDate'])
-        df_clean['DaysSinceLastFailure'] = df_clean.groupby('VehicleID')['OpenDate'].diff().dt.days
+        try:
+            df_clean = df_clean.sort_values(['VehicleID', 'OpenDate'])
+            time_diff = df_clean.groupby('VehicleID')['OpenDate'].diff()
+            df_clean['DaysSinceLastFailure'] = time_diff.dt.days
+        except Exception as e:
+            df_clean['DaysSinceLastFailure'] = np.nan
     
     # Initial anomaly flags (will be refined later)
     df_clean['RepeatFailureFlag'] = False
@@ -438,17 +452,20 @@ def create_trend_analysis(df):
     """Create trend analysis based on Date column"""
     date_col = 'Date' if 'Date' in df.columns else 'OpenDate'
     
-    if date_col in df.columns and pd.api.types.is_datetime64_any_dtype(df[date_col]):
-        df_filtered = df[df[date_col].notna()].copy()
-        df_filtered['month'] = df_filtered[date_col].dt.to_period('M')
-        trend_data = df_filtered.groupby('month').size()
-        
-        status_col = 'Work order status' if 'Work order status' in df.columns else 'Status'
-        if status_col in df.columns:
-            status_trends = df_filtered.groupby(['month', status_col]).size().unstack(fill_value=0)
-            return trend_data, status_trends
-        
-        return trend_data, None
+    try:
+        if date_col in df.columns and pd.api.types.is_datetime64_any_dtype(df[date_col]):
+            df_filtered = df[df[date_col].notna()].copy()
+            df_filtered['month'] = df_filtered[date_col].dt.to_period('M')
+            trend_data = df_filtered.groupby('month').size()
+            
+            status_col = 'Work order status' if 'Work order status' in df.columns else 'Status'
+            if status_col in df.columns:
+                status_trends = df_filtered.groupby(['month', status_col]).size().unstack(fill_value=0)
+                return trend_data, status_trends
+            
+            return trend_data, None
+    except Exception as e:
+        pass
     return None, None
 
 def analyze_spare_parts(df):
